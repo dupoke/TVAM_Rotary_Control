@@ -77,7 +77,7 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
     normalizePortName(selectedPort);
 
     if (!loadApi()) {
-        emit boardLog(QStringLiteral("板卡连接失败: 未加载 COM_GAS_N.dll。"));
+        emit boardLog(QStringLiteral("板卡连接失败: 未加载 GAS.dll/COM_GAS_N.dll。"));
         emit connectionChanged(false, QStringLiteral("N/A"));
         return false;
     }
