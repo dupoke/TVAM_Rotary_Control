@@ -1,9 +1,31 @@
 #include "BoardAdapter.h"
 
+#include <QByteArray>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QSettings>
 
 #include <algorithm>
+
+namespace {
+
+constexpr short kOpenModeSerial = 1;
+constexpr short kDiTypeGpi = 4;
+
+template <typename FnType>
+FnType resolveFunction(QLibrary& lib, const QStringList& names) {
+    for (const QString& name : names) {
+        const QByteArray symbol = name.toLatin1();
+        if (void* ptr = lib.resolve(symbol.constData())) {
+            return reinterpret_cast<FnType>(ptr);
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 BoardAdapter::BoardAdapter(QObject* parent)
     : QObject(parent) {
@@ -52,17 +74,39 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
         emit connectionChanged(false, QStringLiteral("N/A"));
         return false;
     }
+    normalizePortName(selectedPort);
+
+    if (!loadApi()) {
+        emit boardLog(QStringLiteral("板卡连接失败: 未加载 COM_GAS_N.dll。"));
+        emit connectionChanged(false, QStringLiteral("N/A"));
+        return false;
+    }
+
+    QByteArray comName = selectedPort.toLocal8Bit();
+    int rc = gaOpen_(kOpenModeSerial, comName.data());
+    if (rc != 0) {
+        emit boardLog(QStringLiteral("GA_Open 失败(%1): %2").arg(rc).arg(errorText(rc)));
+        emit connectionChanged(false, QStringLiteral("N/A"));
+        return false;
+    }
+
+    rc = gaReset_();
+    if (rc != 0) {
+        emit boardLog(QStringLiteral("GA_Reset 失败(%1): %2").arg(rc).arg(errorText(rc)));
+        gaClose_();
+        emit connectionChanged(false, QStringLiteral("N/A"));
+        return false;
+    }
 
     connected_ = true;
     currentPort_ = selectedPort;
     diRaw_ = 0;
-    tickCount_ = 0;
+    diReadErrorCount_ = 0;
     pollTimer_.start();
 
     emit connectionChanged(true, currentPort_);
     emit diChanged(diRaw_);
-    emit boardLog(QStringLiteral("板卡连接成功(模拟后端)，串口: %1；当前版本尚未接入 COM_GAS_N DLL。")
-                      .arg(currentPort_));
+    emit boardLog(QStringLiteral("板卡连接成功，串口: %1").arg(currentPort_));
     return true;
 }
 
@@ -71,9 +115,16 @@ void BoardAdapter::disconnectBoard() {
         return;
     }
     pollTimer_.stop();
+    if (gaClose_ != nullptr) {
+        const int rc = gaClose_();
+        if (rc != 0) {
+            emit boardLog(QStringLiteral("GA_Close 返回(%1): %2").arg(rc).arg(errorText(rc)));
+        }
+    }
     connected_ = false;
     currentPort_.clear();
     diRaw_ = 0;
+    diReadErrorCount_ = 0;
 
     emit diChanged(diRaw_);
     emit connectionChanged(false, QStringLiteral("N/A"));
@@ -103,8 +154,123 @@ void BoardAdapter::onPollTick() {
     if (!connected_) {
         return;
     }
-    ++tickCount_;
-    // Simulate 4-bit DI status for UI flow debugging.
-    diRaw_ = static_cast<quint32>(tickCount_ % 16);
-    emit diChanged(diRaw_);
+
+    if (gaGetDiRaw_ == nullptr) {
+        return;
+    }
+
+    long raw = 0;
+    const int rc = gaGetDiRaw_(kDiTypeGpi, &raw);
+    if (rc != 0) {
+        ++diReadErrorCount_;
+        if (diReadErrorCount_ == 1 || (diReadErrorCount_ % 10) == 0) {
+            emit boardLog(QStringLiteral("GA_GetDiRaw 失败(%1): %2").arg(rc).arg(errorText(rc)));
+        }
+        return;
+    }
+
+    diReadErrorCount_ = 0;
+    const quint32 normalized = static_cast<quint32>(raw);
+    if (normalized != diRaw_) {
+        diRaw_ = normalized;
+        emit diChanged(diRaw_);
+    }
+}
+
+bool BoardAdapter::loadApi() {
+    if (gaOpen_ != nullptr && gaReset_ != nullptr && gaClose_ != nullptr && gaGetDiRaw_ != nullptr) {
+        return true;
+    }
+
+    unloadApi();
+    for (const QString& candidate : candidateLibraryPaths()) {
+        library_.setFileName(candidate);
+        if (!library_.load()) {
+            continue;
+        }
+
+        gaOpen_ = resolveFunction<GAOpenFn>(library_, {QStringLiteral("GA_Open"), QStringLiteral("_GA_Open@8")});
+        gaReset_ = resolveFunction<GAResetFn>(library_, {QStringLiteral("GA_Reset"), QStringLiteral("_GA_Reset@0")});
+        gaClose_ = resolveFunction<GACloseFn>(library_, {QStringLiteral("GA_Close"), QStringLiteral("_GA_Close@0")});
+        gaGetDiRaw_ = resolveFunction<GAGetDiRawFn>(library_, {QStringLiteral("GA_GetDiRaw"), QStringLiteral("_GA_GetDiRaw@8")});
+        if (gaOpen_ != nullptr && gaReset_ != nullptr && gaClose_ != nullptr && gaGetDiRaw_ != nullptr) {
+            emit boardLog(QStringLiteral("已加载板卡库: %1").arg(QDir::toNativeSeparators(library_.fileName())));
+            return true;
+        }
+
+        emit boardLog(QStringLiteral("已加载 %1 但缺少必要符号，继续尝试其他路径。")
+                          .arg(QDir::toNativeSeparators(library_.fileName())));
+        unloadApi();
+    }
+
+    emit boardLog(QStringLiteral("未找到可用的 COM_GAS_N.dll，请放到程序目录或设置环境变量 COM_GAS_N_DLL。"));
+    return false;
+}
+
+void BoardAdapter::unloadApi() {
+    gaOpen_ = nullptr;
+    gaReset_ = nullptr;
+    gaClose_ = nullptr;
+    gaGetDiRaw_ = nullptr;
+    if (library_.isLoaded()) {
+        library_.unload();
+    }
+}
+
+QString BoardAdapter::errorText(int code) {
+    switch (code) {
+    case 0:
+        return QStringLiteral("执行成功");
+    case 1:
+        return QStringLiteral("执行失败");
+    case 2:
+        return QStringLiteral("版本不支持该接口");
+    case 7:
+        return QStringLiteral("参数错误");
+    case -1:
+        return QStringLiteral("通讯失败");
+    case -6:
+        return QStringLiteral("打开控制器失败");
+    case -7:
+        return QStringLiteral("控制器无响应");
+    default:
+        return QStringLiteral("未知错误");
+    }
+}
+
+QStringList BoardAdapter::candidateLibraryPaths() {
+    QStringList candidates;
+
+    const QString envPath = QString::fromLocal8Bit(qgetenv("COM_GAS_N_DLL")).trimmed();
+    if (!envPath.isEmpty()) {
+        candidates.push_back(envPath);
+    }
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("COM_GAS_N.dll")));
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("com_gas_n.dll")));
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("..\\COM_GAS_N.dll")));
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("..\\..\\COM_GAS_N.dll")));
+
+    const QString cwd = QDir::currentPath();
+    candidates.push_back(QDir(cwd).filePath(QStringLiteral("COM_GAS_N.dll")));
+    candidates.push_back(QDir(cwd).filePath(QStringLiteral("ref\\COM_GAS_N.dll")));
+
+    candidates.push_back(QStringLiteral("COM_GAS_N"));
+
+    QStringList unique;
+    for (const QString& path : candidates) {
+        const QString normalized = QDir::fromNativeSeparators(path);
+        if (!normalized.trimmed().isEmpty() && !unique.contains(normalized)) {
+            unique.push_back(normalized);
+        }
+    }
+    return unique;
+}
+
+void BoardAdapter::normalizePortName(QString& port) {
+    port = port.trimmed().toUpper();
+    if (!port.startsWith(QStringLiteral("COM"))) {
+        port = QStringLiteral("COM%1").arg(port);
+    }
 }
