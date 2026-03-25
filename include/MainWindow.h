@@ -33,6 +33,7 @@ private:
     void initServices();
     void wireSignals();
 
+    void refreshBoardPorts();
     void refreshProjectorPorts();
     bool runImageFolderCheck();
     void updateDiIndicators(quint32 raw);
@@ -63,6 +64,8 @@ private:
     QVector<ImageFrame> checkedFrames_;
 
     QPushButton* btnConnectCard_ = nullptr;
+    QComboBox* comboBoardPort_ = nullptr;
+    QPushButton* btnBoardRefresh_ = nullptr;
     QLabel* lblCardStatus_ = nullptr;
     QLabel* lblComPort_ = nullptr;
     QVector<QLabel*> diIndicators_;

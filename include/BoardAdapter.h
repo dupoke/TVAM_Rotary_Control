@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QStringList>
 #include <QString>
 #include <QTimer>
 
@@ -10,6 +11,7 @@ class BoardAdapter final : public QObject {
 public:
     explicit BoardAdapter(QObject* parent = nullptr);
 
+    QStringList availablePorts() const;
     bool connectBoard(const QString& preferredPort = QString());
     void disconnectBoard();
 
@@ -32,4 +34,3 @@ private:
     int tickCount_ = 0;
     QTimer pollTimer_;
 };
-

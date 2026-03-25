@@ -1,9 +1,43 @@
 #include "BoardAdapter.h"
 
+#include <QRegularExpression>
+#include <QSettings>
+
+#include <algorithm>
+
 BoardAdapter::BoardAdapter(QObject* parent)
     : QObject(parent) {
     pollTimer_.setInterval(200);
     connect(&pollTimer_, &QTimer::timeout, this, &BoardAdapter::onPollTick);
+}
+
+QStringList BoardAdapter::availablePorts() const {
+#ifdef Q_OS_WIN
+    QSettings serialMap(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
+                        QSettings::NativeFormat);
+    QStringList names;
+    const QStringList keys = serialMap.allKeys();
+    for (const QString& key : keys) {
+        const QString value = serialMap.value(key).toString().trimmed();
+        if (!value.isEmpty()) {
+            names.push_back(value.toUpper());
+        }
+    }
+    names.removeDuplicates();
+    std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
+        static const QRegularExpression re(QStringLiteral("^COM(\\d+)$"),
+                                           QRegularExpression::CaseInsensitiveOption);
+        const auto ma = re.match(a);
+        const auto mb = re.match(b);
+        if (ma.hasMatch() && mb.hasMatch()) {
+            return ma.captured(1).toInt() < mb.captured(1).toInt();
+        }
+        return a < b;
+    });
+    return names;
+#else
+    return {};
+#endif
 }
 
 bool BoardAdapter::connectBoard(const QString& preferredPort) {
@@ -14,7 +48,9 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
 
     QString selectedPort = preferredPort.trimmed();
     if (selectedPort.isEmpty()) {
-        selectedPort = QStringLiteral("SIM");
+        emit boardLog(QStringLiteral("未选择板卡串口，连接失败。"));
+        emit connectionChanged(false, QStringLiteral("N/A"));
+        return false;
     }
 
     connected_ = true;
@@ -25,7 +61,8 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
 
     emit connectionChanged(true, currentPort_);
     emit diChanged(diRaw_);
-    emit boardLog(QStringLiteral("板卡连接成功，端口: %1").arg(currentPort_));
+    emit boardLog(QStringLiteral("板卡连接成功(模拟后端)，串口: %1；当前版本尚未接入 COM_GAS_N DLL。")
+                      .arg(currentPort_));
     return true;
 }
 

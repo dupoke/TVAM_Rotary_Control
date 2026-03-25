@@ -85,6 +85,7 @@ void MainWindow::initServices() {
     lblCurrentFrame_->setText(QStringLiteral("当前投影: N/A"));
 
     btnSyncStop_->setEnabled(false);
+    refreshBoardPorts();
     refreshProjectorPorts();
     updateDiIndicators(0);
 }
@@ -97,7 +98,7 @@ void MainWindow::wireSignals() {
             [this](bool connected, const QString& portName) {
                 lblCardStatus_->setText(
                     connected ? QStringLiteral("板卡状态: 已连接") : QStringLiteral("板卡状态: 未连接"));
-                lblComPort_->setText(QStringLiteral("串口: %1").arg(portName));
+                lblComPort_->setText(QStringLiteral("板卡串口: %1").arg(portName));
                 btnConnectCard_->setText(connected ? QStringLiteral("断开板卡")
                                                   : QStringLiteral("连接板卡"));
             });
@@ -159,9 +160,19 @@ void MainWindow::wireSignals() {
         if (boardAdapter_.isConnected()) {
             boardAdapter_.disconnectBoard();
         } else {
-            boardAdapter_.connectBoard(QString());
+            const QString selectedPort = comboBoardPort_ != nullptr
+                                             ? comboBoardPort_->currentText().trimmed()
+                                             : QString();
+            if (selectedPort.isEmpty() || selectedPort == QStringLiteral("无可用串口")) {
+                logService_.warn(QStringLiteral("板卡"), QStringLiteral("请先选择板卡串口。"));
+                return;
+            }
+            if (!boardAdapter_.connectBoard(selectedPort)) {
+                logService_.error(QStringLiteral("板卡"), QStringLiteral("板卡连接失败。"));
+            }
         }
     });
+    connect(btnBoardRefresh_, &QPushButton::clicked, this, [this]() { refreshBoardPorts(); });
 
     auto* btnJogPlus = findChild<QPushButton*>(QStringLiteral("btnJogPlus"));
     auto* btnJogMinus = findChild<QPushButton*>(QStringLiteral("btnJogMinus"));
@@ -327,6 +338,24 @@ void MainWindow::refreshProjectorPorts() {
     }
 }
 
+void MainWindow::refreshBoardPorts() {
+    const QString current = comboBoardPort_->currentText();
+    comboBoardPort_->clear();
+
+    const QStringList ports = boardAdapter_.availablePorts();
+    if (ports.isEmpty()) {
+        comboBoardPort_->addItem(QStringLiteral("无可用串口"));
+        btnConnectCard_->setEnabled(false);
+    } else {
+        comboBoardPort_->addItems(ports);
+        btnConnectCard_->setEnabled(true);
+        const int index = ports.indexOf(current);
+        if (index >= 0) {
+            comboBoardPort_->setCurrentIndex(index);
+        }
+    }
+}
+
 bool MainWindow::runImageFolderCheck() {
     const QString folderPath = editImageFolder_->text().trimmed();
     if (folderPath.isEmpty()) {
@@ -390,16 +419,23 @@ QWidget* MainWindow::createDeviceSection() {
 
     btnConnectCard_ = new QPushButton(QStringLiteral("连接板卡"));
     btnConnectCard_->setObjectName(QStringLiteral("btnConnectCard"));
+    comboBoardPort_ = new QComboBox();
+    comboBoardPort_->setObjectName(QStringLiteral("comboBoardPort"));
+    btnBoardRefresh_ = new QPushButton(QStringLiteral("刷新串口"));
+    btnBoardRefresh_->setObjectName(QStringLiteral("btnBoardRefresh"));
 
     lblCardStatus_ = new QLabel(QStringLiteral("板卡状态: 未连接"));
     lblCardStatus_->setObjectName(QStringLiteral("lblCardStatus"));
 
-    lblComPort_ = new QLabel(QStringLiteral("串口: N/A"));
+    lblComPort_ = new QLabel(QStringLiteral("板卡串口: N/A"));
     lblComPort_->setObjectName(QStringLiteral("lblComPort"));
 
-    layout->addWidget(btnConnectCard_, 0, 0);
-    layout->addWidget(lblCardStatus_, 0, 1);
-    layout->addWidget(lblComPort_, 1, 0, 1, 2);
+    layout->addWidget(new QLabel(QStringLiteral("板卡串口")), 0, 0);
+    layout->addWidget(comboBoardPort_, 0, 1);
+    layout->addWidget(btnBoardRefresh_, 0, 2);
+    layout->addWidget(btnConnectCard_, 1, 0);
+    layout->addWidget(lblCardStatus_, 1, 1, 1, 2);
+    layout->addWidget(lblComPort_, 2, 0, 1, 3);
 
     auto* diRow = new QHBoxLayout();
     diIndicators_.clear();
@@ -413,7 +449,7 @@ QWidget* MainWindow::createDeviceSection() {
         diIndicators_.push_back(indicator);
     }
     diRow->addStretch(1);
-    layout->addLayout(diRow, 2, 0, 1, 2);
+    layout->addLayout(diRow, 3, 0, 1, 3);
     return box;
 }
 
