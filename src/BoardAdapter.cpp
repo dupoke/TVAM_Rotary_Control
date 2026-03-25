@@ -82,20 +82,42 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
         return false;
     }
 
-    QByteArray comName = selectedPort.toLocal8Bit();
-    int rc = gaOpen_(kOpenModeSerial, comName.data());
-    if (rc != 0) {
-        emit boardLog(QStringLiteral("GA_Open 失败(%1): %2").arg(rc).arg(errorText(rc)));
+    if (gaClose_ != nullptr) {
+        gaClose_();
+    }
+
+    int rc = -9999;
+    bool opened = false;
+
+    auto tryOpen = [&](const QString& port, const QString& tag) {
+        QByteArray arg = port.toLocal8Bit();
+        rc = gaOpen_(kOpenModeSerial, arg.data());
+        if (rc == 0) {
+            emit boardLog(QStringLiteral("GA_Open 成功，模式: %1，参数: \"%2\"。").arg(tag, port));
+            opened = true;
+            return;
+        }
+        emit boardLog(QStringLiteral("GA_Open 失败(%1): %2，模式: %3，参数: \"%4\"。")
+                          .arg(rc)
+                          .arg(errorText(rc))
+                          .arg(tag, port));
+    };
+
+    tryOpen(selectedPort, QStringLiteral("手动串口"));
+    if (!opened) {
+        tryOpen(QString(), QStringLiteral("自动搜索"));
+    }
+    if (!opened) {
         emit connectionChanged(false, QStringLiteral("N/A"));
         return false;
     }
 
     rc = gaReset_();
     if (rc != 0) {
-        emit boardLog(QStringLiteral("GA_Reset 失败(%1): %2").arg(rc).arg(errorText(rc)));
-        gaClose_();
-        emit connectionChanged(false, QStringLiteral("N/A"));
-        return false;
+        // Keep behavior aligned with vendor demo: reset failure should not always block open.
+        emit boardLog(QStringLiteral("GA_Reset 返回(%1): %2；继续保持已连接状态。")
+                          .arg(rc)
+                          .arg(errorText(rc)));
     }
 
     connected_ = true;
