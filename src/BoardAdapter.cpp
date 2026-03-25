@@ -183,9 +183,16 @@ bool BoardAdapter::loadApi() {
     }
 
     unloadApi();
+    QStringList tried;
+    QStringList loadErrors;
     for (const QString& candidate : candidateLibraryPaths()) {
+        tried.push_back(QDir::toNativeSeparators(candidate));
         library_.setFileName(candidate);
         if (!library_.load()) {
+            if (loadErrors.size() < 5) {
+                loadErrors.push_back(QStringLiteral("%1 => %2")
+                                         .arg(QDir::toNativeSeparators(candidate), library_.errorString()));
+            }
             continue;
         }
 
@@ -203,7 +210,11 @@ bool BoardAdapter::loadApi() {
         unloadApi();
     }
 
-    emit boardLog(QStringLiteral("未找到可用的 COM_GAS_N.dll，请放到程序目录或设置环境变量 COM_GAS_N_DLL。"));
+    emit boardLog(QStringLiteral("未找到可用的 GAS.dll/COM_GAS_N.dll，请放到程序目录或 third_party/board/x64，或设置环境变量 COM_GAS_N_DLL。"));
+    emit boardLog(QStringLiteral("已尝试路径: %1").arg(tried.join(QStringLiteral(" | "))));
+    if (!loadErrors.isEmpty()) {
+        emit boardLog(QStringLiteral("加载错误示例: %1").arg(loadErrors.join(QStringLiteral(" || "))));
+    }
     return false;
 }
 
@@ -247,15 +258,22 @@ QStringList BoardAdapter::candidateLibraryPaths() {
     }
 
     const QString appDir = QCoreApplication::applicationDirPath();
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("GAS.dll")));
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("gas.dll")));
     candidates.push_back(QDir(appDir).filePath(QStringLiteral("COM_GAS_N.dll")));
     candidates.push_back(QDir(appDir).filePath(QStringLiteral("com_gas_n.dll")));
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("..\\GAS.dll")));
+    candidates.push_back(QDir(appDir).filePath(QStringLiteral("..\\gas.dll")));
     candidates.push_back(QDir(appDir).filePath(QStringLiteral("..\\COM_GAS_N.dll")));
     candidates.push_back(QDir(appDir).filePath(QStringLiteral("..\\..\\COM_GAS_N.dll")));
 
     const QString cwd = QDir::currentPath();
+    candidates.push_back(QDir(cwd).filePath(QStringLiteral("GAS.dll")));
+    candidates.push_back(QDir(cwd).filePath(QStringLiteral("gas.dll")));
     candidates.push_back(QDir(cwd).filePath(QStringLiteral("COM_GAS_N.dll")));
-    candidates.push_back(QDir(cwd).filePath(QStringLiteral("ref\\COM_GAS_N.dll")));
+    candidates.push_back(QDir(cwd).filePath(QStringLiteral("third_party\\board\\x64\\GAS.dll")));
 
+    candidates.push_back(QStringLiteral("GAS"));
     candidates.push_back(QStringLiteral("COM_GAS_N"));
 
     QStringList unique;

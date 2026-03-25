@@ -44,6 +44,19 @@ add_executable(RotaryTableControl
 target_include_directories(RotaryTableControl PRIVATE include)
 target_link_libraries(RotaryTableControl PRIVATE ${QT_LIBS})
 
+# Bundle board runtime DLL into executable folder (no runtime dependency on ref/).
+if(WIN32)
+    set(BOARD_GAS_DLL "${CMAKE_SOURCE_DIR}/third_party/board/x64/GAS.dll")
+    if(EXISTS "${BOARD_GAS_DLL}")
+        add_custom_command(TARGET RotaryTableControl POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${BOARD_GAS_DLL}"
+                "$<TARGET_FILE_DIR:RotaryTableControl>/GAS.dll"
+            VERBATIM
+        )
+    endif()
+endif()
+
 # Keep source/diagnostics encoding consistent for Chinese UI text on MSVC.
 if(MSVC)
     target_compile_options(RotaryTableControl PRIVATE /utf-8)
