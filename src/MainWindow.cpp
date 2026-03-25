@@ -76,6 +76,8 @@ void MainWindow::initServices() {
 
     motionService_.setPulsePerDeg(appConfig_.pulsePerDeg);
     motionService_.setMaxVelocityPulsePerMs(appConfig_.velMaxPulseMs);
+    motionService_.setBoardAdapter(&boardAdapter_);
+    motionService_.setAxisIndex(appConfig_.axisIndex);
     projectorService_.applyConfig(appConfig_);
 
     editRoundTimeSec_->setText(QStringLiteral("60"));
@@ -101,6 +103,9 @@ void MainWindow::wireSignals() {
                 lblComPort_->setText(QStringLiteral("板卡串口: %1").arg(portName));
                 btnConnectCard_->setText(connected ? QStringLiteral("断开板卡")
                                                   : QStringLiteral("连接板卡"));
+                if (!connected && motionService_.stateText() != QStringLiteral("READY")) {
+                    motionService_.stop(true);
+                }
             });
     connect(&boardAdapter_, &BoardAdapter::diChanged, this,
             [this](quint32 raw) { updateDiIndicators(raw); });

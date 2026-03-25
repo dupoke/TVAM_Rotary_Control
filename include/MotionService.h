@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QTimer>
 
+class BoardAdapter;
+
 class MotionService final : public QObject {
     Q_OBJECT
 
@@ -11,6 +13,8 @@ public:
 
     void setPulsePerDeg(double value);
     void setMaxVelocityPulsePerMs(double value);
+    void setBoardAdapter(BoardAdapter* adapter);
+    void setAxisIndex(int axisIndex);
 
     bool jogStart(int direction);
     bool moveToAbsDeg(double targetDeg);
@@ -40,6 +44,8 @@ private:
 
     static double normalizeDeg(double value);
     void setMode(Mode mode);
+    bool useHardware() const;
+    void syncPositionFromHardware();
     void onTick();
 
     QTimer tickTimer_;
@@ -51,8 +57,12 @@ private:
     double pulsePerDeg_ = 250.0;
     double maxVelPulsePerSec_ = 20000.0;
     double jogVelPulsePerSec_ = 2000.0;
+    double accPulsePerMs2_ = 0.5;
+    double decPulsePerMs2_ = 0.5;
 
     int jogDirection_ = 1;
     double continuousPulsePerSec_ = 0.0;
+    int axisIndex_ = 1;
+    BoardAdapter* boardAdapter_ = nullptr;
+    int hardwareReadErrorCount_ = 0;
 };
-

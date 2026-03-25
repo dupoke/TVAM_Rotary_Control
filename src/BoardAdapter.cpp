@@ -13,6 +13,7 @@ namespace {
 
 constexpr short kOpenModeSerial = 1;
 constexpr short kDiTypeGpi = 4;
+constexpr long kAxisRunningBit = 0x00000400;
 
 template <typename FnType>
 FnType resolveFunction(QLibrary& lib, const QStringList& names) {
@@ -172,6 +173,206 @@ bool BoardAdapter::diBit(int index) const {
     return (diRaw_ >> index) & 0x1U;
 }
 
+bool BoardAdapter::jogStart(int axisIndex, int direction, double velPulsePerMs, double accPulsePerMs2,
+                            double decPulsePerMs2, QString* error) {
+    if (!ensureMotionApi(error)) {
+        return false;
+    }
+    if (!validateAxisIndex(axisIndex)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("轴号无效: %1").arg(axisIndex);
+        }
+        return false;
+    }
+    if (direction == 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("点动方向无效。");
+        }
+        return false;
+    }
+
+    int rc = gaAxisOn_(static_cast<short>(axisIndex));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_AxisOn 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    rc = gaPrfJog_(static_cast<short>(axisIndex));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_PrfJog 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+
+    JogPrm prm{};
+    prm.dAcc = qMax(0.001, accPulsePerMs2);
+    prm.dDec = qMax(0.001, decPulsePerMs2);
+    prm.dSmooth = 0.0;
+    rc = gaSetJogPrm_(static_cast<short>(axisIndex), &prm);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_SetJogPrm 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+
+    const double signedVel = qMax(0.001, velPulsePerMs) * (direction > 0 ? 1.0 : -1.0);
+    rc = gaSetVel_(static_cast<short>(axisIndex), signedVel);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_SetVel 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+
+    rc = gaUpdate_(axisMask(axisIndex));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_Update 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    return true;
+}
+
+bool BoardAdapter::moveToPulse(int axisIndex, qint64 pulse, double velPulsePerMs, double accPulsePerMs2,
+                               double decPulsePerMs2, QString* error) {
+    if (!ensureMotionApi(error)) {
+        return false;
+    }
+    if (!validateAxisIndex(axisIndex)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("轴号无效: %1").arg(axisIndex);
+        }
+        return false;
+    }
+
+    int rc = gaAxisOn_(static_cast<short>(axisIndex));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_AxisOn 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    rc = gaPrfTrap_(static_cast<short>(axisIndex));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_PrfTrap 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+
+    TrapPrm prm{};
+    prm.acc = qMax(0.001, accPulsePerMs2);
+    prm.dec = qMax(0.001, decPulsePerMs2);
+    prm.velStart = 0.0;
+    prm.smoothTime = 0;
+    rc = gaSetTrapPrm_(static_cast<short>(axisIndex), &prm);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_SetTrapPrm 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+
+    const long target = static_cast<long>(pulse);
+    rc = gaSetPos_(static_cast<short>(axisIndex), target);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_SetPos 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    rc = gaSetVel_(static_cast<short>(axisIndex), qMax(0.001, velPulsePerMs));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_SetVel 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    rc = gaUpdate_(axisMask(axisIndex));
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_Update 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    return true;
+}
+
+bool BoardAdapter::stopAxis(int axisIndex, bool estop, QString* error) {
+    if (!ensureMotionApi(error)) {
+        return false;
+    }
+    if (!validateAxisIndex(axisIndex)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("轴号无效: %1").arg(axisIndex);
+        }
+        return false;
+    }
+
+    const long mask = axisMask(axisIndex);
+    const long option = estop ? 0xFFFF : 0;
+    const int rc = gaStop_(mask, option);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_Stop 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    return true;
+}
+
+bool BoardAdapter::getProfilePositionPulse(int axisIndex, double& outPulse, QString* error) {
+    if (!ensureMotionApi(error)) {
+        return false;
+    }
+    if (!validateAxisIndex(axisIndex)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("轴号无效: %1").arg(axisIndex);
+        }
+        return false;
+    }
+
+    unsigned long clock = 0;
+    double pos = 0.0;
+    const int rc = gaGetPrfPos_(static_cast<short>(axisIndex), &pos, 1, &clock);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_GetPrfPos 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    outPulse = pos;
+    return true;
+}
+
+bool BoardAdapter::getAxisStatus(int axisIndex, long& outStatus, QString* error) {
+    if (!ensureMotionApi(error)) {
+        return false;
+    }
+    if (!validateAxisIndex(axisIndex)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("轴号无效: %1").arg(axisIndex);
+        }
+        return false;
+    }
+
+    unsigned long clock = 0;
+    long sts = 0;
+    const int rc = gaGetSts_(static_cast<short>(axisIndex), &sts, 1, &clock);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_GetSts 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    outStatus = sts;
+    return true;
+}
+
 void BoardAdapter::onPollTick() {
     if (!connected_) {
         return;
@@ -222,6 +423,17 @@ bool BoardAdapter::loadApi() {
         gaReset_ = resolveFunction<GAResetFn>(library_, {QStringLiteral("GA_Reset"), QStringLiteral("_GA_Reset@0")});
         gaClose_ = resolveFunction<GACloseFn>(library_, {QStringLiteral("GA_Close"), QStringLiteral("_GA_Close@0")});
         gaGetDiRaw_ = resolveFunction<GAGetDiRawFn>(library_, {QStringLiteral("GA_GetDiRaw"), QStringLiteral("_GA_GetDiRaw@8")});
+        gaAxisOn_ = resolveFunction<GAAxisOnFn>(library_, {QStringLiteral("GA_AxisOn"), QStringLiteral("_GA_AxisOn@4")});
+        gaPrfTrap_ = resolveFunction<GAPrfTrapFn>(library_, {QStringLiteral("GA_PrfTrap"), QStringLiteral("_GA_PrfTrap@4")});
+        gaSetTrapPrm_ = resolveFunction<GASetTrapPrmFn>(library_, {QStringLiteral("GA_SetTrapPrm"), QStringLiteral("_GA_SetTrapPrm@8")});
+        gaPrfJog_ = resolveFunction<GAPrfJogFn>(library_, {QStringLiteral("GA_PrfJog"), QStringLiteral("_GA_PrfJog@4")});
+        gaSetJogPrm_ = resolveFunction<GASetJogPrmFn>(library_, {QStringLiteral("GA_SetJogPrm"), QStringLiteral("_GA_SetJogPrm@8")});
+        gaSetPos_ = resolveFunction<GASetPosFn>(library_, {QStringLiteral("GA_SetPos"), QStringLiteral("_GA_SetPos@8")});
+        gaSetVel_ = resolveFunction<GASetVelFn>(library_, {QStringLiteral("GA_SetVel"), QStringLiteral("_GA_SetVel@12")});
+        gaUpdate_ = resolveFunction<GAUpdateFn>(library_, {QStringLiteral("GA_Update"), QStringLiteral("_GA_Update@4")});
+        gaStop_ = resolveFunction<GAStopFn>(library_, {QStringLiteral("GA_Stop"), QStringLiteral("_GA_Stop@8")});
+        gaGetPrfPos_ = resolveFunction<GAGetPrfPosFn>(library_, {QStringLiteral("GA_GetPrfPos"), QStringLiteral("_GA_GetPrfPos@16")});
+        gaGetSts_ = resolveFunction<GAGetStsFn>(library_, {QStringLiteral("GA_GetSts"), QStringLiteral("_GA_GetSts@16")});
         if (gaOpen_ != nullptr && gaReset_ != nullptr && gaClose_ != nullptr && gaGetDiRaw_ != nullptr) {
             emit boardLog(QStringLiteral("已加载板卡库: %1").arg(QDir::toNativeSeparators(library_.fileName())));
             return true;
@@ -245,6 +457,17 @@ void BoardAdapter::unloadApi() {
     gaReset_ = nullptr;
     gaClose_ = nullptr;
     gaGetDiRaw_ = nullptr;
+    gaAxisOn_ = nullptr;
+    gaPrfTrap_ = nullptr;
+    gaSetTrapPrm_ = nullptr;
+    gaPrfJog_ = nullptr;
+    gaSetJogPrm_ = nullptr;
+    gaSetPos_ = nullptr;
+    gaSetVel_ = nullptr;
+    gaUpdate_ = nullptr;
+    gaStop_ = nullptr;
+    gaGetPrfPos_ = nullptr;
+    gaGetSts_ = nullptr;
     if (library_.isLoaded()) {
         library_.unload();
     }
@@ -313,4 +536,31 @@ void BoardAdapter::normalizePortName(QString& port) {
     if (!port.startsWith(QStringLiteral("COM"))) {
         port = QStringLiteral("COM%1").arg(port);
     }
+}
+
+bool BoardAdapter::validateAxisIndex(int axisIndex) {
+    return axisIndex >= 1 && axisIndex <= 16;
+}
+
+long BoardAdapter::axisMask(int axisIndex) {
+    return 1L << (axisIndex - 1);
+}
+
+bool BoardAdapter::ensureMotionApi(QString* error) {
+    if (!connected_) {
+        if (error != nullptr) {
+            *error = QStringLiteral("板卡未连接。");
+        }
+        return false;
+    }
+    if (gaAxisOn_ == nullptr || gaPrfTrap_ == nullptr || gaSetTrapPrm_ == nullptr ||
+        gaPrfJog_ == nullptr || gaSetJogPrm_ == nullptr || gaSetPos_ == nullptr ||
+        gaSetVel_ == nullptr || gaUpdate_ == nullptr || gaStop_ == nullptr ||
+        gaGetPrfPos_ == nullptr || gaGetSts_ == nullptr) {
+        if (error != nullptr) {
+            *error = QStringLiteral("板卡运动接口未就绪。");
+        }
+        return false;
+    }
+    return true;
 }

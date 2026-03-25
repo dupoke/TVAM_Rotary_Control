@@ -1,7 +1,13 @@
 #include "MotionService.h"
 
+#include "BoardAdapter.h"
+
 #include <QtMath>
 #include <cmath>
+
+namespace {
+constexpr long kAxisRunningBit = 0x00000400;
+}
 
 MotionService::MotionService(QObject* parent)
     : QObject(parent) {
@@ -26,12 +32,40 @@ void MotionService::setMaxVelocityPulsePerMs(double value) {
     jogVelPulsePerSec_ = qMin(maxVelPulsePerSec_, 2000.0);
 }
 
+void MotionService::setBoardAdapter(BoardAdapter* adapter) {
+    boardAdapter_ = adapter;
+}
+
+void MotionService::setAxisIndex(int axisIndex) {
+    if (axisIndex < 1 || axisIndex > 16) {
+        emit motionError(QStringLiteral("轴号配置无效: %1。").arg(axisIndex));
+        return;
+    }
+    axisIndex_ = axisIndex;
+}
+
 bool MotionService::jogStart(int direction) {
     if (direction == 0) {
         emit motionError(QStringLiteral("点动方向无效。"));
         return false;
     }
     jogDirection_ = direction > 0 ? 1 : -1;
+
+    if (useHardware()) {
+        QString error;
+        if (!boardAdapter_->jogStart(axisIndex_, jogDirection_, jogVelPulsePerSec_ / 1000.0,
+                                     accPulsePerMs2_, decPulsePerMs2_, &error)) {
+            emit motionError(error);
+            return false;
+        }
+        setMode(Mode::Jogging);
+        syncPositionFromHardware();
+        emit motionLog(QStringLiteral("点动开始(硬件)，轴%1，方向: %2")
+                           .arg(axisIndex_)
+                           .arg(jogDirection_ > 0 ? "+" : "-"));
+        return true;
+    }
+
     setMode(Mode::Jogging);
     emit motionLog(QStringLiteral("点动开始，方向: %1").arg(jogDirection_ > 0 ? "+" : "-"));
     return true;
@@ -40,6 +74,20 @@ bool MotionService::jogStart(int direction) {
 bool MotionService::moveToAbsDeg(double targetDeg) {
     const qint64 target = static_cast<qint64>(qRound64(targetDeg * pulsePerDeg_));
     targetPulse_ = target;
+
+    if (useHardware()) {
+        QString error;
+        if (!boardAdapter_->moveToPulse(axisIndex_, targetPulse_, maxVelPulsePerSec_ / 1000.0,
+                                        accPulsePerMs2_, decPulsePerMs2_, &error)) {
+            emit motionError(error);
+            return false;
+        }
+        setMode(Mode::Positioning);
+        syncPositionFromHardware();
+        emit motionLog(QStringLiteral("绝对移动(硬件)到 %1°").arg(targetDeg, 0, 'f', 3));
+        return true;
+    }
+
     setMode(Mode::Positioning);
     emit motionLog(QStringLiteral("绝对移动到 %1°").arg(targetDeg, 0, 'f', 3));
     return true;
@@ -48,6 +96,20 @@ bool MotionService::moveToAbsDeg(double targetDeg) {
 bool MotionService::moveByRelDeg(double deltaDeg) {
     const qint64 deltaPulse = static_cast<qint64>(qRound64(deltaDeg * pulsePerDeg_));
     targetPulse_ = currentPulse_ + deltaPulse;
+
+    if (useHardware()) {
+        QString error;
+        if (!boardAdapter_->moveToPulse(axisIndex_, targetPulse_, maxVelPulsePerSec_ / 1000.0,
+                                        accPulsePerMs2_, decPulsePerMs2_, &error)) {
+            emit motionError(error);
+            return false;
+        }
+        setMode(Mode::Positioning);
+        syncPositionFromHardware();
+        emit motionLog(QStringLiteral("相对移动(硬件) %1°").arg(deltaDeg, 0, 'f', 3));
+        return true;
+    }
+
     setMode(Mode::Positioning);
     emit motionLog(QStringLiteral("相对移动 %1°").arg(deltaDeg, 0, 'f', 3));
     return true;
@@ -64,6 +126,20 @@ bool MotionService::startContinuous(double roundTimeSec) {
         emit motionError(QStringLiteral("连续旋转速度计算失败。"));
         return false;
     }
+
+    if (useHardware()) {
+        QString error;
+        if (!boardAdapter_->jogStart(axisIndex_, +1, continuousPulsePerSec_ / 1000.0,
+                                     accPulsePerMs2_, decPulsePerMs2_, &error)) {
+            emit motionError(error);
+            return false;
+        }
+        setMode(Mode::Continuous);
+        syncPositionFromHardware();
+        emit motionLog(QStringLiteral("连续旋转开始(硬件)，一圈时间: %1 s").arg(roundTimeSec, 0, 'f', 3));
+        return true;
+    }
+
     setMode(Mode::Continuous);
     emit motionLog(QStringLiteral("连续旋转开始，一圈时间: %1 s").arg(roundTimeSec, 0, 'f', 3));
     return true;
@@ -71,8 +147,17 @@ bool MotionService::startContinuous(double roundTimeSec) {
 
 void MotionService::stop(bool estop) {
     const bool wasRunning = mode_ != Mode::Idle;
+    if (wasRunning && useHardware()) {
+        QString error;
+        if (!boardAdapter_->stopAxis(axisIndex_, estop, &error)) {
+            emit motionError(error);
+        }
+    }
     setMode(Mode::Idle);
     if (wasRunning) {
+        if (useHardware()) {
+            syncPositionFromHardware();
+        }
         emit motionLog(estop ? QStringLiteral("急停触发。") : QStringLiteral("运动停止。"));
         emit motionFinished();
     }
@@ -126,9 +211,56 @@ void MotionService::setMode(Mode mode) {
     emit stateChanged(stateText());
 }
 
+bool MotionService::useHardware() const {
+    return boardAdapter_ != nullptr && boardAdapter_->isConnected();
+}
+
+void MotionService::syncPositionFromHardware() {
+    if (!useHardware()) {
+        return;
+    }
+
+    double pulse = 0.0;
+    QString error;
+    if (!boardAdapter_->getProfilePositionPulse(axisIndex_, pulse, &error)) {
+        ++hardwareReadErrorCount_;
+        if (hardwareReadErrorCount_ == 1 || (hardwareReadErrorCount_ % 20) == 0) {
+            emit motionError(error);
+        }
+        return;
+    }
+
+    hardwareReadErrorCount_ = 0;
+    currentPulse_ = static_cast<qint64>(qRound64(pulse));
+    emit positionChanged(currentPulse_, currentTotalDeg(), currentCycleDeg());
+}
+
 void MotionService::onTick() {
     const double dtSec = tickTimer_.interval() / 1000.0;
     if (dtSec <= 0.0) {
+        return;
+    }
+
+    if (useHardware()) {
+        if (mode_ == Mode::Idle) {
+            return;
+        }
+        syncPositionFromHardware();
+
+        if (mode_ == Mode::Positioning) {
+            long sts = 0;
+            QString error;
+            if (!boardAdapter_->getAxisStatus(axisIndex_, sts, &error)) {
+                emit motionError(error);
+                return;
+            }
+            const bool running = (sts & kAxisRunningBit) != 0;
+            if (!running) {
+                setMode(Mode::Idle);
+                emit motionFinished();
+                emit motionLog(QStringLiteral("定位完成。"));
+            }
+        }
         return;
     }
 
