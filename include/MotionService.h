@@ -17,6 +17,7 @@ public:
     void setAxisIndex(int axisIndex);
 
     bool jogStart(int direction);
+    bool jogStart(int direction, double velPulsePerMs);
     bool moveToAbsDeg(double targetDeg);
     bool moveByRelDeg(double deltaDeg);
     bool startContinuous(double roundTimeSec);
@@ -57,6 +58,7 @@ private:
     double pulsePerDeg_ = 250.0;
     double maxVelPulsePerSec_ = 20000.0;
     double jogVelPulsePerSec_ = 2000.0;
+    double activeJogVelPulsePerSec_ = 2000.0;
     double accPulsePerMs2_ = 0.5;
     double decPulsePerMs2_ = 0.5;
 

@@ -30,6 +30,13 @@ public:
     ~MainWindow() override = default;
 
 private:
+    enum class CoarseHomeStage {
+        Idle,
+        SeekFirstEdge,
+        SeekSecondEdge,
+        MoveToMidpoint
+    };
+
     void setupUi();
     void initServices();
     void wireSignals();
@@ -119,4 +126,9 @@ private:
     QTimer coarseHomeTimer_;
     bool coarseHoming_ = false;
     int coarseHomeElapsedMs_ = 0;
+    CoarseHomeStage coarseHomeStage_ = CoarseHomeStage::Idle;
+    bool coarseHomeInitialDi_ = false;
+    qint64 coarseHomeFirstEdgePulse_ = 0;
+    qint64 coarseHomeSecondEdgePulse_ = 0;
+    qint64 coarseHomeMidPulse_ = 0;
 };

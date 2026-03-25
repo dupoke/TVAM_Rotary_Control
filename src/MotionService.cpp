@@ -45,29 +45,40 @@ void MotionService::setAxisIndex(int axisIndex) {
 }
 
 bool MotionService::jogStart(int direction) {
+    return jogStart(direction, -1.0);
+}
+
+bool MotionService::jogStart(int direction, double velPulsePerMs) {
     if (direction == 0) {
         emit motionError(QStringLiteral("点动方向无效。"));
         return false;
     }
     jogDirection_ = direction > 0 ? 1 : -1;
+    const double requestedPulsePerSec = velPulsePerMs > 0.0
+                                            ? velPulsePerMs * 1000.0
+                                            : jogVelPulsePerSec_;
+    activeJogVelPulsePerSec_ = qBound(1.0, requestedPulsePerSec, maxVelPulsePerSec_);
 
     if (useHardware()) {
         QString error;
-        if (!boardAdapter_->jogStart(axisIndex_, jogDirection_, jogVelPulsePerSec_ / 1000.0,
+        if (!boardAdapter_->jogStart(axisIndex_, jogDirection_, activeJogVelPulsePerSec_ / 1000.0,
                                      accPulsePerMs2_, decPulsePerMs2_, &error)) {
             emit motionError(error);
             return false;
         }
         setMode(Mode::Jogging);
         syncPositionFromHardware();
-        emit motionLog(QStringLiteral("点动开始(硬件)，轴%1，方向: %2")
+        emit motionLog(QStringLiteral("点动开始(硬件)，轴%1，方向: %2，速度: %3 脉冲/ms")
                            .arg(axisIndex_)
-                           .arg(jogDirection_ > 0 ? "+" : "-"));
+                           .arg(jogDirection_ > 0 ? "+" : "-")
+                           .arg(activeJogVelPulsePerSec_ / 1000.0, 0, 'f', 3));
         return true;
     }
 
     setMode(Mode::Jogging);
-    emit motionLog(QStringLiteral("点动开始，方向: %1").arg(jogDirection_ > 0 ? "+" : "-"));
+    emit motionLog(QStringLiteral("点动开始，方向: %1，速度: %2 脉冲/ms")
+                       .arg(jogDirection_ > 0 ? "+" : "-")
+                       .arg(activeJogVelPulsePerSec_ / 1000.0, 0, 'f', 3));
     return true;
 }
 
@@ -268,7 +279,7 @@ void MotionService::onTick() {
     case Mode::Idle:
         return;
     case Mode::Jogging: {
-        const double deltaPulse = jogDirection_ * jogVelPulsePerSec_ * dtSec;
+        const double deltaPulse = jogDirection_ * activeJogVelPulsePerSec_ * dtSec;
         currentPulse_ += static_cast<qint64>(qRound64(deltaPulse));
         break;
     }

@@ -125,6 +125,11 @@ void MainWindow::wireSignals() {
                 lblCurrentPulse_->setText(QStringLiteral("当前位置脉冲: %1").arg(pulse));
                 lblCurrentDeg_->setText(QStringLiteral("当前角度: %1°").arg(cycleDeg, 0, 'f', 3));
             });
+    connect(&motionService_, &MotionService::motionFinished, this, [this]() {
+        if (coarseHoming_ && coarseHomeStage_ == CoarseHomeStage::MoveToMidpoint) {
+            finishCoarseHoming(true, QStringLiteral("粗零点完成: 双边沿中点已对齐。"));
+        }
+    });
 
     connect(&projectorService_, &ProjectorService::projectorLog, this,
             [this](const QString& msg) { logService_.info(QStringLiteral("光机"), msg); });
@@ -194,12 +199,37 @@ void MainWindow::wireSignals() {
             return;
         }
         coarseHomeElapsedMs_ += coarseHomeTimer_.interval();
-        if (boardAdapter_.diBit(1)) {
-            finishCoarseHoming(true, QStringLiteral("粗零点完成: DI1 已触发。"));
-            return;
+
+        const bool di = boardAdapter_.diBit(1);
+        if (coarseHomeStage_ == CoarseHomeStage::SeekFirstEdge) {
+            if (di != coarseHomeInitialDi_) {
+                coarseHomeFirstEdgePulse_ = motionService_.currentPulse();
+                coarseHomeStage_ = CoarseHomeStage::SeekSecondEdge;
+                logService_.info(QStringLiteral("回零"),
+                                 QStringLiteral("粗零点第一边沿触发，位置脉冲: %1")
+                                     .arg(coarseHomeFirstEdgePulse_));
+            }
+        } else if (coarseHomeStage_ == CoarseHomeStage::SeekSecondEdge) {
+            if (di == coarseHomeInitialDi_) {
+                coarseHomeSecondEdgePulse_ = motionService_.currentPulse();
+                coarseHomeMidPulse_ =
+                    (coarseHomeFirstEdgePulse_ + coarseHomeSecondEdgePulse_) / 2;
+                coarseHomeStage_ = CoarseHomeStage::MoveToMidpoint;
+                motionService_.stop(false);
+                const double midDeg = coarseHomeMidPulse_ / appConfig_.pulsePerDeg;
+                if (!motionService_.moveToAbsDeg(midDeg)) {
+                    finishCoarseHoming(false, QStringLiteral("粗零点失败: 无法移动到边沿中点。"));
+                    return;
+                }
+                logService_.info(QStringLiteral("回零"),
+                                 QStringLiteral("粗零点第二边沿触发，位置脉冲: %1，中点脉冲: %2")
+                                     .arg(coarseHomeSecondEdgePulse_)
+                                     .arg(coarseHomeMidPulse_));
+            }
         }
+
         if (coarseHomeElapsedMs_ >= appConfig_.homeTimeoutMs) {
-            finishCoarseHoming(false, QStringLiteral("粗零点失败: 超时未触发 DI1。"));
+            finishCoarseHoming(false, QStringLiteral("粗零点失败: 超时未完成双边沿定位。"));
         }
     });
     boardPortScanTimer_.start();
@@ -456,12 +486,8 @@ bool MainWindow::startCoarseHoming() {
         logService_.warn(QStringLiteral("回零"), QStringLiteral("请先连接板卡后再执行粗零点。"));
         return false;
     }
-    if (boardAdapter_.diBit(1)) {
-        finishCoarseHoming(true, QStringLiteral("粗零点完成: DI1 已是触发状态。"));
-        return true;
-    }
-
-    if (!motionService_.jogStart(-1)) {
+    const double coarseVelPulseMs = qBound(1.0, appConfig_.velMaxPulseMs * 0.8, appConfig_.velMaxPulseMs);
+    if (!motionService_.jogStart(-1, coarseVelPulseMs)) {
         lblHomeResult_->setText(QStringLiteral("回零结果: 粗零点启动失败。"));
         logService_.error(QStringLiteral("回零"), QStringLiteral("粗零点启动失败: 无法进入点动。"));
         return false;
@@ -469,13 +495,20 @@ bool MainWindow::startCoarseHoming() {
 
     coarseHoming_ = true;
     coarseHomeElapsedMs_ = 0;
+    coarseHomeStage_ = CoarseHomeStage::SeekFirstEdge;
+    coarseHomeInitialDi_ = boardAdapter_.diBit(1);
+    coarseHomeFirstEdgePulse_ = 0;
+    coarseHomeSecondEdgePulse_ = 0;
+    coarseHomeMidPulse_ = 0;
     coarseHomeTimer_.start();
     btnCoarseCheck_->setEnabled(false);
     btnFineHome_->setEnabled(false);
     lblHomeResult_->setText(QStringLiteral("回零结果: 粗零点进行中..."));
     lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
     logService_.info(QStringLiteral("回零"),
-                     QStringLiteral("粗零点开始: 低速反向旋转等待 DI1 触发。"));
+                     QStringLiteral("粗零点开始: 双边沿中点法，速度 %1 脉冲/ms，初始DI1=%2。")
+                         .arg(coarseVelPulseMs, 0, 'f', 3)
+                         .arg(coarseHomeInitialDi_ ? QStringLiteral("ON") : QStringLiteral("OFF")));
     return true;
 }
 
@@ -486,6 +519,7 @@ void MainWindow::finishCoarseHoming(bool success, const QString& message) {
     }
     coarseHoming_ = false;
     coarseHomeElapsedMs_ = 0;
+    coarseHomeStage_ = CoarseHomeStage::Idle;
     btnCoarseCheck_->setEnabled(true);
     btnFineHome_->setEnabled(true);
 
