@@ -347,22 +347,56 @@ void MainWindow::refreshBoardPorts() {
     const QString current = comboBoardPort_->currentText();
     comboBoardPort_->clear();
 
-    const QStringList ports = boardAdapter_.availablePorts();
-    if (ports.isEmpty()) {
-        // Keep manual COM input available when auto-discovery fails.
-        comboBoardPort_->setEditText(current);
-        btnConnectCard_->setEnabled(true);
-        logService_.warn(QStringLiteral("板卡"),
-                         QStringLiteral("未扫描到串口，可手动输入 COM 号后连接（如 COM7）。"));
-    } else {
-        comboBoardPort_->addItems(ports);
-        btnConnectCard_->setEnabled(true);
-        const int index = ports.indexOf(current);
+    auto normalizeCom = [](QString port) {
+        port = port.trimmed().toUpper();
+        if (port.isEmpty()) {
+            return port;
+        }
+        bool ok = false;
+        const int number = port.toInt(&ok);
+        if (ok && number > 0) {
+            return QStringLiteral("COM%1").arg(number);
+        }
+        if (!port.startsWith(QStringLiteral("COM"))) {
+            return QStringLiteral("COM%1").arg(port);
+        }
+        return port;
+    };
+
+    QStringList mergedPorts;
+    for (int i = 1; i <= 50; ++i) {
+        mergedPorts.push_back(QStringLiteral("COM%1").arg(i));
+    }
+
+    const QStringList scannedPorts = boardAdapter_.availablePorts();
+    for (const QString& port : scannedPorts) {
+        const QString normalized = normalizeCom(port);
+        if (!normalized.isEmpty() && !mergedPorts.contains(normalized)) {
+            mergedPorts.push_back(normalized);
+        }
+    }
+
+    const QString normalizedCurrent = normalizeCom(current);
+    if (!normalizedCurrent.isEmpty() && !mergedPorts.contains(normalizedCurrent)) {
+        mergedPorts.push_back(normalizedCurrent);
+    }
+
+    comboBoardPort_->addItems(mergedPorts);
+    btnConnectCard_->setEnabled(true);
+
+    if (!normalizedCurrent.isEmpty()) {
+        const int index = mergedPorts.indexOf(normalizedCurrent);
         if (index >= 0) {
             comboBoardPort_->setCurrentIndex(index);
-        } else if (!current.trimmed().isEmpty()) {
-            comboBoardPort_->setEditText(current);
+            return;
         }
+    }
+
+    const int com3Index = mergedPorts.indexOf(QStringLiteral("COM3"));
+    if (com3Index >= 0) {
+        comboBoardPort_->setCurrentIndex(com3Index);
+    } else if (!mergedPorts.isEmpty()) {
+        comboBoardPort_->setCurrentIndex(0);
     }
 }
 
@@ -431,11 +465,7 @@ QWidget* MainWindow::createDeviceSection() {
     btnConnectCard_->setObjectName(QStringLiteral("btnConnectCard"));
     comboBoardPort_ = new QComboBox();
     comboBoardPort_->setObjectName(QStringLiteral("comboBoardPort"));
-    comboBoardPort_->setEditable(true);
-    comboBoardPort_->setInsertPolicy(QComboBox::NoInsert);
-    if (comboBoardPort_->lineEdit() != nullptr) {
-        comboBoardPort_->lineEdit()->setPlaceholderText(QStringLiteral("手动输入 COM 号，如 COM7"));
-    }
+    comboBoardPort_->setEditable(false);
     btnBoardRefresh_ = new QPushButton(QStringLiteral("刷新串口"));
     btnBoardRefresh_->setObjectName(QStringLiteral("btnBoardRefresh"));
 
