@@ -163,7 +163,7 @@ void MainWindow::wireSignals() {
             const QString selectedPort = comboBoardPort_ != nullptr
                                              ? comboBoardPort_->currentText().trimmed()
                                              : QString();
-            if (selectedPort.isEmpty() || selectedPort == QStringLiteral("无可用串口")) {
+            if (selectedPort.isEmpty()) {
                 logService_.warn(QStringLiteral("板卡"), QStringLiteral("请先选择板卡串口。"));
                 return;
             }
@@ -344,14 +344,19 @@ void MainWindow::refreshBoardPorts() {
 
     const QStringList ports = boardAdapter_.availablePorts();
     if (ports.isEmpty()) {
-        comboBoardPort_->addItem(QStringLiteral("无可用串口"));
-        btnConnectCard_->setEnabled(false);
+        // Keep manual COM input available when auto-discovery fails.
+        comboBoardPort_->setEditText(current);
+        btnConnectCard_->setEnabled(true);
+        logService_.warn(QStringLiteral("板卡"),
+                         QStringLiteral("未扫描到串口，可手动输入 COM 号后连接（如 COM7）。"));
     } else {
         comboBoardPort_->addItems(ports);
         btnConnectCard_->setEnabled(true);
         const int index = ports.indexOf(current);
         if (index >= 0) {
             comboBoardPort_->setCurrentIndex(index);
+        } else if (!current.trimmed().isEmpty()) {
+            comboBoardPort_->setEditText(current);
         }
     }
 }
@@ -421,6 +426,11 @@ QWidget* MainWindow::createDeviceSection() {
     btnConnectCard_->setObjectName(QStringLiteral("btnConnectCard"));
     comboBoardPort_ = new QComboBox();
     comboBoardPort_->setObjectName(QStringLiteral("comboBoardPort"));
+    comboBoardPort_->setEditable(true);
+    comboBoardPort_->setInsertPolicy(QComboBox::NoInsert);
+    if (comboBoardPort_->lineEdit() != nullptr) {
+        comboBoardPort_->lineEdit()->setPlaceholderText(QStringLiteral("手动输入 COM 号，如 COM7"));
+    }
     btnBoardRefresh_ = new QPushButton(QStringLiteral("刷新串口"));
     btnBoardRefresh_->setObjectName(QStringLiteral("btnBoardRefresh"));
 
