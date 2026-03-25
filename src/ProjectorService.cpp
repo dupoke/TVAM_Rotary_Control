@@ -1,6 +1,10 @@
 #include "ProjectorService.h"
 
+#include <QRegularExpression>
+#include <QSettings>
 #include <QSerialPortInfo>
+
+#include <algorithm>
 
 ProjectorService::ProjectorService(QObject* parent)
     : QObject(parent) {
@@ -11,12 +15,38 @@ void ProjectorService::applyConfig(const AppConfig& config) {
 }
 
 QStringList ProjectorService::availablePorts() const {
+#ifdef Q_OS_WIN
+    // Avoid unstable SetupAPI enumeration path on some driver stacks.
+    QSettings serialMap(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
+                        QSettings::NativeFormat);
+    QStringList names;
+    const QStringList keys = serialMap.allKeys();
+    for (const QString& key : keys) {
+        const QString value = serialMap.value(key).toString().trimmed();
+        if (!value.isEmpty()) {
+            names.push_back(value.toUpper());
+        }
+    }
+    names.removeDuplicates();
+    std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
+        static const QRegularExpression re(QStringLiteral("^COM(\\d+)$"),
+                                           QRegularExpression::CaseInsensitiveOption);
+        const auto ma = re.match(a);
+        const auto mb = re.match(b);
+        if (ma.hasMatch() && mb.hasMatch()) {
+            return ma.captured(1).toInt() < mb.captured(1).toInt();
+        }
+        return a < b;
+    });
+    return names;
+#else
     QStringList names;
     const auto ports = QSerialPortInfo::availablePorts();
     for (const auto& info : ports) {
         names.push_back(info.portName());
     }
     return names;
+#endif
 }
 
 bool ProjectorService::openPort(const QString& portName, QString* error) {
@@ -124,4 +154,3 @@ bool ProjectorService::sendCommand(const QString& cmd, QString* error) {
     emit projectorLog(QStringLiteral("命令发送成功: %1").arg(cmd));
     return true;
 }
-

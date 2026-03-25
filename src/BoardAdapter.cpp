@@ -1,7 +1,5 @@
 #include "BoardAdapter.h"
 
-#include <QSerialPortInfo>
-
 BoardAdapter::BoardAdapter(QObject* parent)
     : QObject(parent) {
     pollTimer_.setInterval(200);
@@ -15,12 +13,6 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
     }
 
     QString selectedPort = preferredPort.trimmed();
-    if (selectedPort.isEmpty()) {
-        const auto ports = QSerialPortInfo::availablePorts();
-        if (!ports.isEmpty()) {
-            selectedPort = ports.first().portName();
-        }
-    }
     if (selectedPort.isEmpty()) {
         selectedPort = QStringLiteral("SIM");
     }
@@ -79,4 +71,3 @@ void BoardAdapter::onPollTick() {
     diRaw_ = static_cast<quint32>(tickCount_ % 16);
     emit diChanged(diRaw_);
 }
-
