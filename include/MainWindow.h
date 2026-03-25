@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QTimer>
 #include <QVector>
 
 #include "BoardAdapter.h"
@@ -36,6 +37,8 @@ private:
     void refreshBoardPorts();
     void refreshProjectorPorts();
     bool runImageFolderCheck();
+    bool startCoarseHoming();
+    void finishCoarseHoming(bool success, const QString& message);
     void updateDiIndicators(quint32 raw);
     void appendUiLog(const QString& message);
 
@@ -74,6 +77,8 @@ private:
     QLineEdit* editTargetRelDeg_ = nullptr;
     QLabel* lblCurrentDeg_ = nullptr;
     QLabel* lblCurrentPulse_ = nullptr;
+    QPushButton* btnCoarseCheck_ = nullptr;
+    QPushButton* btnFineHome_ = nullptr;
     QLabel* lblHomeResult_ = nullptr;
     QLabel* lblZeroErrorDeg_ = nullptr;
     QLabel* lblLaserState_ = nullptr;
@@ -109,4 +114,9 @@ private:
     QLabel* lblSyncProgress_ = nullptr;
 
     QPlainTextEdit* textLog_ = nullptr;
+
+    QTimer boardPortScanTimer_;
+    QTimer coarseHomeTimer_;
+    bool coarseHoming_ = false;
+    int coarseHomeElapsedMs_ = 0;
 };

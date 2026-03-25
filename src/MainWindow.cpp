@@ -87,6 +87,8 @@ void MainWindow::initServices() {
     lblCurrentFrame_->setText(QStringLiteral("当前投影: N/A"));
 
     btnSyncStop_->setEnabled(false);
+    boardPortScanTimer_.setInterval(1500);
+    coarseHomeTimer_.setInterval(50);
     refreshBoardPorts();
     refreshProjectorPorts();
     updateDiIndicators(0);
@@ -103,8 +105,12 @@ void MainWindow::wireSignals() {
                 lblComPort_->setText(QStringLiteral("板卡串口: %1").arg(portName));
                 btnConnectCard_->setText(connected ? QStringLiteral("断开板卡")
                                                   : QStringLiteral("连接板卡"));
-                if (!connected && motionService_.stateText() != QStringLiteral("READY")) {
-                    motionService_.stop(true);
+                if (!connected) {
+                    if (coarseHoming_) {
+                        finishCoarseHoming(false, QStringLiteral("粗零点中断: 板卡已断开。"));
+                    } else if (motionService_.stateText() != QStringLiteral("READY")) {
+                        motionService_.stop(true);
+                    }
                 }
             });
     connect(&boardAdapter_, &BoardAdapter::diChanged, this,
@@ -178,6 +184,25 @@ void MainWindow::wireSignals() {
         }
     });
     connect(btnBoardRefresh_, &QPushButton::clicked, this, [this]() { refreshBoardPorts(); });
+    connect(&boardPortScanTimer_, &QTimer::timeout, this, [this]() {
+        if (!boardAdapter_.isConnected()) {
+            refreshBoardPorts();
+        }
+    });
+    connect(&coarseHomeTimer_, &QTimer::timeout, this, [this]() {
+        if (!coarseHoming_) {
+            return;
+        }
+        coarseHomeElapsedMs_ += coarseHomeTimer_.interval();
+        if (boardAdapter_.diBit(1)) {
+            finishCoarseHoming(true, QStringLiteral("粗零点完成: DI1 已触发。"));
+            return;
+        }
+        if (coarseHomeElapsedMs_ >= appConfig_.homeTimeoutMs) {
+            finishCoarseHoming(false, QStringLiteral("粗零点失败: 超时未触发 DI1。"));
+        }
+    });
+    boardPortScanTimer_.start();
 
     auto* btnJogPlus = findChild<QPushButton*>(QStringLiteral("btnJogPlus"));
     auto* btnJogMinus = findChild<QPushButton*>(QStringLiteral("btnJogMinus"));
@@ -188,8 +213,18 @@ void MainWindow::wireSignals() {
 
     connect(btnJogPlus, &QPushButton::pressed, this, [this]() { motionService_.jogStart(+1); });
     connect(btnJogMinus, &QPushButton::pressed, this, [this]() { motionService_.jogStart(-1); });
-    connect(btnStop, &QPushButton::clicked, this, [this]() { motionService_.stop(false); });
-    connect(btnEStop, &QPushButton::clicked, this, [this]() { motionService_.stop(true); });
+    connect(btnStop, &QPushButton::clicked, this, [this]() {
+        motionService_.stop(false);
+        if (coarseHoming_) {
+            finishCoarseHoming(false, QStringLiteral("粗零点已手动停止。"));
+        }
+    });
+    connect(btnEStop, &QPushButton::clicked, this, [this]() {
+        motionService_.stop(true);
+        if (coarseHoming_) {
+            finishCoarseHoming(false, QStringLiteral("粗零点已急停中断。"));
+        }
+    });
 
     connect(btnMoveAbs, &QPushButton::clicked, this, [this]() {
         double value = 0.0;
@@ -207,16 +242,14 @@ void MainWindow::wireSignals() {
         motionService_.moveByRelDeg(value);
     });
 
-    auto* btnCoarseCheck = findChild<QPushButton*>(QStringLiteral("btnCoarseCheck"));
-    auto* btnFineHome = findChild<QPushButton*>(QStringLiteral("btnFineHome"));
-    connect(btnCoarseCheck, &QPushButton::clicked, this, [this]() {
-        lblHomeResult_->setText(QStringLiteral("回零结果: 粗零点自检通过(模拟)"));
-        logService_.info(QStringLiteral("回零"), QStringLiteral("执行粗零点自检(模拟)。"));
+    connect(btnCoarseCheck_, &QPushButton::clicked, this, [this]() {
+        startCoarseHoming();
     });
-    connect(btnFineHome, &QPushButton::clicked, this, [this]() {
-        lblHomeResult_->setText(QStringLiteral("回零结果: 精零点完成(模拟)"));
-        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): 0.000"));
-        logService_.info(QStringLiteral("回零"), QStringLiteral("执行精零点流程(模拟)。"));
+    connect(btnFineHome_, &QPushButton::clicked, this, [this]() {
+        lblHomeResult_->setText(QStringLiteral("回零结果: 精零点待硬件安装后启用。"));
+        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
+        logService_.info(QStringLiteral("回零"),
+                         QStringLiteral("精零点功能暂未启用，等待对射开关硬件到位。"));
     });
 
     auto* btnConfirmZReady = findChild<QPushButton*>(QStringLiteral("btnConfirmZReady"));
@@ -364,7 +397,7 @@ void MainWindow::refreshBoardPorts() {
     };
 
     QStringList mergedPorts;
-    for (int i = 1; i <= 50; ++i) {
+    for (int i = 1; i <= 5; ++i) {
         mergedPorts.push_back(QStringLiteral("COM%1").arg(i));
     }
 
@@ -391,13 +424,7 @@ void MainWindow::refreshBoardPorts() {
             return;
         }
     }
-
-    const int com3Index = mergedPorts.indexOf(QStringLiteral("COM3"));
-    if (com3Index >= 0) {
-        comboBoardPort_->setCurrentIndex(com3Index);
-    } else if (!mergedPorts.isEmpty()) {
-        comboBoardPort_->setCurrentIndex(0);
-    }
+    comboBoardPort_->setCurrentIndex(-1);
 }
 
 bool MainWindow::runImageFolderCheck() {
@@ -418,6 +445,57 @@ bool MainWindow::runImageFolderCheck() {
         logService_.warn(QStringLiteral("序列"), result.message);
     }
     return result.ok;
+}
+
+bool MainWindow::startCoarseHoming() {
+    if (coarseHoming_) {
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("粗零点流程已在运行。"));
+        return false;
+    }
+    if (!boardAdapter_.isConnected()) {
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("请先连接板卡后再执行粗零点。"));
+        return false;
+    }
+    if (boardAdapter_.diBit(1)) {
+        finishCoarseHoming(true, QStringLiteral("粗零点完成: DI1 已是触发状态。"));
+        return true;
+    }
+
+    if (!motionService_.jogStart(-1)) {
+        lblHomeResult_->setText(QStringLiteral("回零结果: 粗零点启动失败。"));
+        logService_.error(QStringLiteral("回零"), QStringLiteral("粗零点启动失败: 无法进入点动。"));
+        return false;
+    }
+
+    coarseHoming_ = true;
+    coarseHomeElapsedMs_ = 0;
+    coarseHomeTimer_.start();
+    btnCoarseCheck_->setEnabled(false);
+    btnFineHome_->setEnabled(false);
+    lblHomeResult_->setText(QStringLiteral("回零结果: 粗零点进行中..."));
+    lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
+    logService_.info(QStringLiteral("回零"),
+                     QStringLiteral("粗零点开始: 低速反向旋转等待 DI1 触发。"));
+    return true;
+}
+
+void MainWindow::finishCoarseHoming(bool success, const QString& message) {
+    coarseHomeTimer_.stop();
+    if (coarseHoming_) {
+        motionService_.stop(!success);
+    }
+    coarseHoming_ = false;
+    coarseHomeElapsedMs_ = 0;
+    btnCoarseCheck_->setEnabled(true);
+    btnFineHome_->setEnabled(true);
+
+    lblHomeResult_->setText(QStringLiteral("回零结果: %1").arg(message));
+    if (success) {
+        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
+        logService_.info(QStringLiteral("回零"), message);
+    } else {
+        logService_.error(QStringLiteral("回零"), message);
+    }
 }
 
 void MainWindow::updateDiIndicators(quint32 raw) {
@@ -551,18 +629,18 @@ QWidget* MainWindow::createHomingSection() {
     auto* box = new QGroupBox(QStringLiteral("回零"));
     auto* layout = new QGridLayout(box);
 
-    auto* btnCoarseCheck = new QPushButton(QStringLiteral("粗零点自检"));
-    btnCoarseCheck->setObjectName(QStringLiteral("btnCoarseCheck"));
-    auto* btnFineHome = new QPushButton(QStringLiteral("精零点"));
-    btnFineHome->setObjectName(QStringLiteral("btnFineHome"));
+    btnCoarseCheck_ = new QPushButton(QStringLiteral("粗零点"));
+    btnCoarseCheck_->setObjectName(QStringLiteral("btnCoarseCheck"));
+    btnFineHome_ = new QPushButton(QStringLiteral("精零点"));
+    btnFineHome_->setObjectName(QStringLiteral("btnFineHome"));
 
     lblHomeResult_ = new QLabel(QStringLiteral("回零结果: N/A"));
     lblHomeResult_->setObjectName(QStringLiteral("lblHomeResult"));
     lblZeroErrorDeg_ = new QLabel(QStringLiteral("零点误差(°): N/A"));
     lblZeroErrorDeg_->setObjectName(QStringLiteral("lblZeroErrorDeg"));
 
-    layout->addWidget(btnCoarseCheck, 0, 0);
-    layout->addWidget(btnFineHome, 0, 1);
+    layout->addWidget(btnCoarseCheck_, 0, 0);
+    layout->addWidget(btnFineHome_, 0, 1);
     layout->addWidget(lblHomeResult_, 1, 0, 1, 2);
     layout->addWidget(lblZeroErrorDeg_, 2, 0, 1, 2);
 
