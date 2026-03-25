@@ -1,0 +1,13 @@
+# Build outputs
+/build/
+/build_mingw/
+
+# IDE/user files
+/.qtcreator/
+*.user
+
+# Runtime outputs
+/logs/*.log
+
+# Windows noise
+Thumbs.db
