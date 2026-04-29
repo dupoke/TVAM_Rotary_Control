@@ -5,6 +5,9 @@
 /CMakeFiles/
 /cmake-build-*/
 /.cmake/
+/out/
+/bin/
+/obj/
 CMakeCache.txt
 compile_commands.json
 cmake_install.cmake
@@ -27,16 +30,23 @@ Makefile
 *.pro.user*
 *.vcxproj.user
 *.sln.docstates
+*.zip
+*.7z
+*.rar
 
 # IDE/user files
 /.qtcreator/
 *.user
 /.vs/
+/.idea/
+/.vscode/
 
 # Runtime outputs
 /logs/
 /captures/
 /backups/
+/RunTimeLog/
+/WatchData/
 *.log
 *.tmp
 
@@ -51,3 +61,4 @@ Thumbs.db
 /third_party/opencv/
 /CODEX_HANDOFF_*.md
 /AGENT_PROMPT.md
+.DS_Store
