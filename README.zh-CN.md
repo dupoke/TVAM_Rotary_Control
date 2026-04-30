@@ -111,3 +111,4 @@ ui/           Qt Designer 界面文件
 - 当前仓库版本定义为 `v0.1`
 - 这一版预计不会再有大的架构调整
 - `.gitignore` 已排除 `dist/`、`build/`、`tmp/`、运行日志以及本地 OpenCV 二进制
+- 硬件型号参考见：[HARDWARE_REFERENCE.zh-CN.md](HARDWARE_REFERENCE.zh-CN.md)

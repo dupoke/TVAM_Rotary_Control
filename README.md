@@ -111,3 +111,4 @@ ui/           Qt Designer UI files
 - This repository is versioned as `v0.1`
 - No major architectural changes are expected for the current release line
 - `dist/`, `build/`, `tmp/`, runtime logs and local OpenCV binaries are excluded by `.gitignore`
+- Hardware model summary: [HARDWARE_REFERENCE.zh-CN.md](HARDWARE_REFERENCE.zh-CN.md)
