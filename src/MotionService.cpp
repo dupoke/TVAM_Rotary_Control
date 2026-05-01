@@ -68,17 +68,20 @@ bool MotionService::jogStart(int direction, double velPulsePerMs) {
         }
         setMode(Mode::Jogging);
         syncPositionFromHardware();
-        emit motionLog(QStringLiteral("点动开始(硬件)，轴%1，方向: %2，速度: %3 脉冲/ms")
+        const double speedDegPerSec = activeJogVelPulsePerSec_ / pulsePerDeg_;
+        emit motionLog(QStringLiteral("点动开始(硬件)，轴%1，方向: %2，速度: %3 °/s")
                            .arg(axisIndex_)
                            .arg(jogDirection_ > 0 ? "+" : "-")
-                           .arg(activeJogVelPulsePerSec_ / 1000.0, 0, 'f', 3));
+                           .arg(speedDegPerSec, 0, 'f', 3));
+        scheduleHardwareMotionProbe(QStringLiteral("点动"), currentPulse_);
         return true;
     }
 
     setMode(Mode::Jogging);
-    emit motionLog(QStringLiteral("点动开始，方向: %1，速度: %2 脉冲/ms")
+    const double speedDegPerSec = activeJogVelPulsePerSec_ / pulsePerDeg_;
+    emit motionLog(QStringLiteral("点动开始，方向: %1，速度: %2 °/s")
                        .arg(jogDirection_ > 0 ? "+" : "-")
-                       .arg(activeJogVelPulsePerSec_ / 1000.0, 0, 'f', 3));
+                       .arg(speedDegPerSec, 0, 'f', 3));
     return true;
 }
 
@@ -148,6 +151,7 @@ bool MotionService::startContinuous(double roundTimeSec) {
         setMode(Mode::Continuous);
         syncPositionFromHardware();
         emit motionLog(QStringLiteral("连续旋转开始(硬件)，一圈时间: %1 s").arg(roundTimeSec, 0, 'f', 3));
+        scheduleHardwareMotionProbe(QStringLiteral("连续旋转"), currentPulse_);
         return true;
     }
 
@@ -172,6 +176,14 @@ void MotionService::stop(bool estop) {
         emit motionLog(estop ? QStringLiteral("急停触发。") : QStringLiteral("运动停止。"));
         emit motionFinished();
     }
+}
+
+void MotionService::refreshPosition() {
+    if (useHardware()) {
+        syncPositionFromHardware();
+        return;
+    }
+    emit positionChanged(currentPulse_, currentTotalDeg(), currentCycleDeg());
 }
 
 qint64 MotionService::currentPulse() const {
@@ -244,6 +256,43 @@ void MotionService::syncPositionFromHardware() {
     hardwareReadErrorCount_ = 0;
     currentPulse_ = static_cast<qint64>(qRound64(pulse));
     emit positionChanged(currentPulse_, currentTotalDeg(), currentCycleDeg());
+}
+
+void MotionService::scheduleHardwareMotionProbe(const QString& context, qint64 startPulse) {
+    if (!useHardware()) {
+        return;
+    }
+
+    QTimer::singleShot(150, this, [this, context, startPulse]() {
+        if (!useHardware() || mode_ == Mode::Idle) {
+            return;
+        }
+
+        long status = 0;
+        QString statusError;
+        const bool statusOk = boardAdapter_->getAxisStatus(axisIndex_, status, &statusError);
+
+        double pulse = 0.0;
+        QString pulseError;
+        const bool pulseOk = boardAdapter_->getProfilePositionPulse(axisIndex_, pulse, &pulseError);
+
+        if (!statusOk) {
+            emit motionLog(QStringLiteral("%1探测: 读取轴状态失败: %2").arg(context, statusError));
+            return;
+        }
+        if (!pulseOk) {
+            emit motionLog(QStringLiteral("%1探测: 读取位置失败: %2").arg(context, pulseError));
+            return;
+        }
+
+        const qint64 currentProbePulse = static_cast<qint64>(qRound64(pulse));
+        const qint64 deltaPulse = currentProbePulse - startPulse;
+        emit motionLog(QStringLiteral("%1探测: status=0x%2, pulse=%3, delta=%4")
+                           .arg(context)
+                           .arg(QString::number(static_cast<qulonglong>(status), 16).toUpper())
+                           .arg(currentProbePulse)
+                           .arg(deltaPulse));
+    });
 }
 
 void MotionService::onTick() {

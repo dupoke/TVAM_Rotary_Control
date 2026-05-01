@@ -1,4 +1,4 @@
-#include "ProjectorService.h"
+﻿#include "ProjectorService.h"
 
 #include <QRegularExpression>
 #include <QSettings>
@@ -6,28 +6,33 @@
 
 #include <algorithm>
 
-ProjectorService::ProjectorService(QObject* parent)
-    : QObject(parent) {
-}
+namespace {
 
-void ProjectorService::applyConfig(const AppConfig& config) {
-    config_ = config;
-}
-
-QStringList ProjectorService::availablePorts() const {
-#ifdef Q_OS_WIN
-    // Avoid unstable SetupAPI enumeration path on some driver stacks.
-    QSettings serialMap(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
-                        QSettings::NativeFormat);
-    QStringList names;
-    const QStringList keys = serialMap.allKeys();
-    for (const QString& key : keys) {
-        const QString value = serialMap.value(key).toString().trimmed();
-        if (!value.isEmpty()) {
-            names.push_back(value.toUpper());
-        }
+QString normalizePortName(QString port) {
+    port = port.trimmed().toUpper();
+    if (port.isEmpty()) {
+        return port;
     }
-    names.removeDuplicates();
+
+    bool ok = false;
+    const int number = port.toInt(&ok);
+    if (ok && number > 0) {
+        return QStringLiteral("COM%1").arg(number);
+    }
+    if (!port.startsWith(QStringLiteral("COM"))) {
+        return QStringLiteral("COM%1").arg(port);
+    }
+    return port;
+}
+
+void appendPortName(QStringList& names, const QString& port) {
+    const QString normalized = normalizePortName(port);
+    if (!normalized.isEmpty() && !names.contains(normalized)) {
+        names.push_back(normalized);
+    }
+}
+
+void sortPortNames(QStringList& names) {
     std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
         static const QRegularExpression re(QStringLiteral("^COM(\\d+)$"),
                                            QRegularExpression::CaseInsensitiveOption);
@@ -38,15 +43,106 @@ QStringList ProjectorService::availablePorts() const {
         }
         return a < b;
     });
-    return names;
-#else
+}
+
+int portPriorityScore(const QSerialPortInfo& info) {
+    int score = 0;
+    const QString description = info.description().trimmed().toLower();
+    const QString manufacturer = info.manufacturer().trimmed().toLower();
+    const QString serial = info.serialNumber().trimmed().toLower();
+
+    if (info.hasVendorIdentifier() && info.vendorIdentifier() == 0x1A86) {
+        score -= 260;
+    }
+    if (info.hasVendorIdentifier() && info.vendorIdentifier() == 0x0403) {
+        score += 200;
+    }
+    if (info.hasProductIdentifier() &&
+        (info.productIdentifier() == 0xE201 || info.productIdentifier() == 0x7523 ||
+         info.productIdentifier() == 0x5523)) {
+        score -= 180;
+    }
+    if (info.hasProductIdentifier() && info.productIdentifier() == 0x6001) {
+        score += 100;
+    }
+    if (description.contains(QStringLiteral("wch")) ||
+        manufacturer.contains(QStringLiteral("wch")) ||
+        description.contains(QStringLiteral("ch340")) ||
+        description.contains(QStringLiteral("ch341")) ||
+        serial.contains(QStringLiteral("ch340")) ||
+        serial.contains(QStringLiteral("ch341"))) {
+        score -= 180;
+    }
+    if (description.contains(QStringLiteral("ftdi")) ||
+        manufacturer.contains(QStringLiteral("ftdi")) ||
+        serial.contains(QStringLiteral("ftdi"))) {
+        score += 160;
+    }
+    if (description.contains(QStringLiteral("usb serial port"))) {
+        score += 80;
+    }
+    if (description.contains(QStringLiteral("usb 串行设备")) ||
+        manufacturer.contains(QStringLiteral("microsoft"))) {
+        score -= 20;
+    }
+    return score;
+}
+
+}  // namespace
+
+ProjectorService::ProjectorService(QObject* parent)
+    : QObject(parent) {
+}
+
+void ProjectorService::applyConfig(const AppConfig& config) {
+    config_ = config;
+}
+
+QStringList ProjectorService::availablePorts() const {
     QStringList names;
+
     const auto ports = QSerialPortInfo::availablePorts();
     for (const auto& info : ports) {
-        names.push_back(info.portName());
+        if (portPriorityScore(info) > 0) {
+            appendPortName(names, info.portName());
+        }
     }
+
+    sortPortNames(names);
     return names;
-#endif
+}
+
+QStringList ProjectorService::autoDetectPorts() const {
+    QStringList orderedPorts = availablePorts();
+    const auto infos = QSerialPortInfo::availablePorts();
+
+    auto scoreForPort = [&infos](const QString& portName) {
+        for (const auto& info : infos) {
+            if (normalizePortName(info.portName()) == normalizePortName(portName)) {
+                return portPriorityScore(info);
+            }
+        }
+        return 0;
+    };
+
+    std::sort(orderedPorts.begin(), orderedPorts.end(), [&scoreForPort](const QString& a, const QString& b) {
+        const int scoreA = scoreForPort(a);
+        const int scoreB = scoreForPort(b);
+        if (scoreA != scoreB) {
+            return scoreA > scoreB;
+        }
+
+        static const QRegularExpression re(QStringLiteral("^COM(\\d+)$"),
+                                           QRegularExpression::CaseInsensitiveOption);
+        const auto ma = re.match(a);
+        const auto mb = re.match(b);
+        if (ma.hasMatch() && mb.hasMatch()) {
+            return ma.captured(1).toInt() < mb.captured(1).toInt();
+        }
+        return a < b;
+    });
+
+    return orderedPorts;
 }
 
 bool ProjectorService::openPort(const QString& portName, QString* error) {
@@ -138,8 +234,11 @@ bool ProjectorService::sendCommand(const QString& cmd, QString* error) {
     }
 
     if (!serial_.isOpen()) {
-        emit projectorLog(QStringLiteral("光机串口未连接，模拟发送: %1").arg(cmd));
-        return true;
+        if (error != nullptr) {
+            *error = QStringLiteral("光机串口未打开。");
+        }
+        emit projectorLog(QStringLiteral("命令发送失败: 光机串口未打开。"));
+        return false;
     }
 
     const qint64 sent = serial_.write(payload);
@@ -151,6 +250,6 @@ bool ProjectorService::sendCommand(const QString& cmd, QString* error) {
         return false;
     }
 
-    emit projectorLog(QStringLiteral("命令发送成功: %1").arg(cmd));
     return true;
 }
+

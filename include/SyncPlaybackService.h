@@ -25,7 +25,7 @@ signals:
     void stateChanged(const QString& stateText);
     void progressChanged(int loopIndex, int loopTarget, double cycleDeg);
     void frameChanged(int frameIndex, int loopIndex, const QString& filePath, double angleDeg);
-    void syncFinished();
+    void syncFinished(bool completed);
     void syncLog(const QString& message);
 
 private:
@@ -41,4 +41,3 @@ private:
     int nextFrameIndex_ = 0;
     double startTotalDeg_ = 0.0;
 };
-

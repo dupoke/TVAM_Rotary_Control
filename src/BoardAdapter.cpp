@@ -5,7 +5,9 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSerialPortInfo>
 #include <QSettings>
+#include <QThread>
 
 #include <algorithm>
 
@@ -14,6 +16,8 @@ namespace {
 constexpr short kOpenModeSerial = 1;
 constexpr short kDiTypeGpi = 4;
 constexpr long kAxisRunningBit = 0x00000400;
+constexpr int kZeroWaitStepMs = 20;
+constexpr int kZeroWaitMaxMs = 1000;
 
 template <typename FnType>
 FnType resolveFunction(QLibrary& lib, const QStringList& names) {
@@ -26,27 +30,31 @@ FnType resolveFunction(QLibrary& lib, const QStringList& names) {
     return nullptr;
 }
 
-}  // namespace
+QString normalizePortNameCopy(QString port) {
+    port = port.trimmed().toUpper();
+    if (port.isEmpty()) {
+        return port;
+    }
 
-BoardAdapter::BoardAdapter(QObject* parent)
-    : QObject(parent) {
-    pollTimer_.setInterval(200);
-    connect(&pollTimer_, &QTimer::timeout, this, &BoardAdapter::onPollTick);
+    bool ok = false;
+    const int number = port.toInt(&ok);
+    if (ok && number > 0) {
+        return QStringLiteral("COM%1").arg(number);
+    }
+    if (!port.startsWith(QStringLiteral("COM"))) {
+        return QStringLiteral("COM%1").arg(port);
+    }
+    return port;
 }
 
-QStringList BoardAdapter::availablePorts() const {
-#ifdef Q_OS_WIN
-    QSettings serialMap(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
-                        QSettings::NativeFormat);
-    QStringList names;
-    const QStringList keys = serialMap.allKeys();
-    for (const QString& key : keys) {
-        const QString value = serialMap.value(key).toString().trimmed();
-        if (!value.isEmpty()) {
-            names.push_back(value.toUpper());
-        }
+void appendPortName(QStringList& names, const QString& port) {
+    const QString normalized = normalizePortNameCopy(port);
+    if (!normalized.isEmpty() && !names.contains(normalized)) {
+        names.push_back(normalized);
     }
-    names.removeDuplicates();
+}
+
+void sortPortNames(QStringList& names) {
     std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
         static const QRegularExpression re(QStringLiteral("^COM(\\d+)$"),
                                            QRegularExpression::CaseInsensitiveOption);
@@ -57,10 +65,113 @@ QStringList BoardAdapter::availablePorts() const {
         }
         return a < b;
     });
-    return names;
-#else
-    return {};
+}
+
+int boardPortPriorityScore(const QSerialPortInfo& info) {
+    int score = 0;
+    const QString description = info.description().trimmed().toLower();
+    const QString manufacturer = info.manufacturer().trimmed().toLower();
+    const QString serial = info.serialNumber().trimmed().toLower();
+
+    if (info.hasVendorIdentifier()) {
+        if (info.vendorIdentifier() == 0x1A86) {
+            score += 260;
+        }
+        if (info.vendorIdentifier() == 0x0403) {
+            score -= 240;
+        }
+    }
+    if (info.hasProductIdentifier()) {
+        if (info.productIdentifier() == 0xE201 || info.productIdentifier() == 0x7523 ||
+            info.productIdentifier() == 0x5523) {
+            score += 180;
+        }
+        if (info.productIdentifier() == 0x6001) {
+            score -= 120;
+        }
+    }
+
+    if (description.contains(QStringLiteral("wch")) ||
+        manufacturer.contains(QStringLiteral("wch")) ||
+        description.contains(QStringLiteral("ch340")) ||
+        description.contains(QStringLiteral("ch341")) ||
+        serial.contains(QStringLiteral("ch340")) ||
+        serial.contains(QStringLiteral("ch341"))) {
+        score += 180;
+    }
+    if (description.contains(QStringLiteral("usb serial")) ||
+        description.contains(QStringLiteral("usb 串行"))) {
+        score += 40;
+    }
+    if (description.contains(QStringLiteral("ftdi")) ||
+        manufacturer.contains(QStringLiteral("ftdi")) ||
+        serial.contains(QStringLiteral("ftdi"))) {
+        score -= 180;
+    }
+
+    return score;
+}
+
+}  // namespace
+
+BoardAdapter::BoardAdapter(QObject* parent)
+    : QObject(parent) {
+    pollTimer_.setInterval(200);
+    pollTimer_.setTimerType(Qt::PreciseTimer);
+    connect(&pollTimer_, &QTimer::timeout, this, &BoardAdapter::onPollTick);
+}
+
+QStringList BoardAdapter::availablePorts() const {
+    QStringList names;
+
+#ifdef Q_OS_WIN
+    QSettings serialMap(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM"),
+                        QSettings::NativeFormat);
+    const QStringList keys = serialMap.allKeys();
+    for (const QString& key : keys) {
+        appendPortName(names, serialMap.value(key).toString());
+    }
 #endif
+
+    for (const auto& info : QSerialPortInfo::availablePorts()) {
+        appendPortName(names, info.portName());
+    }
+
+    sortPortNames(names);
+    return names;
+}
+
+QStringList BoardAdapter::autoDetectPorts() const {
+    QStringList orderedPorts = availablePorts();
+    const auto infos = QSerialPortInfo::availablePorts();
+
+    auto scoreForPort = [&infos](const QString& portName) {
+        for (const auto& info : infos) {
+            if (normalizePortNameCopy(info.portName()) == normalizePortNameCopy(portName)) {
+                return boardPortPriorityScore(info);
+            }
+        }
+        return 0;
+    };
+
+    std::sort(orderedPorts.begin(), orderedPorts.end(), [&scoreForPort](const QString& a, const QString& b) {
+        const int scoreA = scoreForPort(a);
+        const int scoreB = scoreForPort(b);
+        if (scoreA != scoreB) {
+            return scoreA > scoreB;
+        }
+
+        static const QRegularExpression re(QStringLiteral("^COM(\\d+)$"),
+                                           QRegularExpression::CaseInsensitiveOption);
+        const auto ma = re.match(a);
+        const auto mb = re.match(b);
+        if (ma.hasMatch() && mb.hasMatch()) {
+            return ma.captured(1).toInt() < mb.captured(1).toInt();
+        }
+        return a < b;
+    });
+
+    return orderedPorts;
 }
 
 bool BoardAdapter::connectBoard(const QString& preferredPort) {
@@ -106,19 +217,45 @@ bool BoardAdapter::connectBoard(const QString& preferredPort) {
 
     tryOpen(selectedPort, QStringLiteral("手动串口"));
     if (!opened) {
-        tryOpen(QString(), QStringLiteral("自动搜索"));
-    }
-    if (!opened) {
+        emit boardLog(QStringLiteral("板卡连接失败: 请确认串口选择是否正确。"));
         emit connectionChanged(false, QStringLiteral("N/A"));
         return false;
     }
 
+    auto closeOpenedPort = [this]() {
+        if (gaClose_ != nullptr) {
+            gaClose_();
+        }
+    };
+
     rc = gaReset_();
     if (rc != 0) {
-        // Keep behavior aligned with vendor demo: reset failure should not always block open.
         emit boardLog(QStringLiteral("GA_Reset 返回(%1): %2；继续保持已连接状态。")
                           .arg(rc)
                           .arg(errorText(rc)));
+
+        bool commVerified = false;
+        long raw = 0;
+        for (int attempt = 1; attempt <= 3; ++attempt) {
+            QThread::msleep(60);
+            const int probeRc = gaGetDiRaw_(kDiTypeGpi, &raw);
+            if (probeRc == 0) {
+                commVerified = true;
+                emit boardLog(QStringLiteral("GA_Reset 失败，但连通性校验成功，继续使用串口: %1")
+                                  .arg(selectedPort));
+                break;
+            }
+            emit boardLog(QStringLiteral("板卡连通性校验失败(%1): %2，尝试%3/3。")
+                              .arg(probeRc)
+                              .arg(errorText(probeRc))
+                              .arg(attempt));
+        }
+        if (!commVerified) {
+            closeOpenedPort();
+            emit boardLog(QStringLiteral("板卡连接失败: 串口已打开，但未检测到控制器响应。"));
+            emit connectionChanged(false, QStringLiteral("N/A"));
+            return false;
+        }
     }
 
     connected_ = true;
@@ -231,6 +368,22 @@ bool BoardAdapter::jogStart(int axisIndex, int direction, double velPulsePerMs, 
     if (rc != 0) {
         if (error != nullptr) {
             *error = QStringLiteral("GA_Update 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    return true;
+}
+
+bool BoardAdapter::ensureZeroApi(QString* error) {
+    if (!connected_) {
+        if (error != nullptr) {
+            *error = QStringLiteral("鏉垮崱鏈繛鎺ャ€?");
+        }
+        return false;
+    }
+    if (gaZeroPos_ == nullptr) {
+        if (error != nullptr) {
+            *error = QStringLiteral("鏉垮崱闆剁偣鎺ュ彛鏈氨缁€?");
         }
         return false;
     }
@@ -373,6 +526,55 @@ bool BoardAdapter::getAxisStatus(int axisIndex, long& outStatus, QString* error)
     return true;
 }
 
+bool BoardAdapter::zeroAxis(int axisIndex, QString* error) {
+    if (!ensureZeroApi(error)) {
+        return false;
+    }
+    if (!validateAxisIndex(axisIndex)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("轴号无效: %1").arg(axisIndex);
+        }
+        return false;
+    }
+
+    if (gaGetSts_ != nullptr) {
+        unsigned long clock = 0;
+        long sts = 0;
+        int waited = 0;
+        while (waited < kZeroWaitMaxMs) {
+            const int rc = gaGetSts_(static_cast<short>(axisIndex), &sts, 1, &clock);
+            if (rc == 0) {
+                if ((sts & kAxisRunningBit) == 0) {
+                    break;
+                }
+            }
+            QThread::msleep(kZeroWaitStepMs);
+            waited += kZeroWaitStepMs;
+        }
+    }
+
+    const int rc = gaZeroPos_(static_cast<short>(axisIndex), 1);
+    if (rc != 0) {
+        if (error != nullptr) {
+            *error = QStringLiteral("GA_ZeroPos 失败(%1): %2").arg(rc).arg(errorText(rc));
+        }
+        return false;
+    }
+    if (gaClrSts_ != nullptr) {
+        gaClrSts_(static_cast<short>(axisIndex), 1);
+    }
+    return true;
+}
+
+void BoardAdapter::setPollIntervalMs(int intervalMs) {
+    const int clamped = qBound(2, intervalMs, 2000);
+    pollTimer_.setInterval(clamped);
+}
+
+int BoardAdapter::pollIntervalMs() const {
+    return pollTimer_.interval();
+}
+
 void BoardAdapter::onPollTick() {
     if (!connected_) {
         return;
@@ -434,6 +636,8 @@ bool BoardAdapter::loadApi() {
         gaStop_ = resolveFunction<GAStopFn>(library_, {QStringLiteral("GA_Stop"), QStringLiteral("_GA_Stop@8")});
         gaGetPrfPos_ = resolveFunction<GAGetPrfPosFn>(library_, {QStringLiteral("GA_GetPrfPos"), QStringLiteral("_GA_GetPrfPos@16")});
         gaGetSts_ = resolveFunction<GAGetStsFn>(library_, {QStringLiteral("GA_GetSts"), QStringLiteral("_GA_GetSts@16")});
+        gaZeroPos_ = resolveFunction<GAZeroPosFn>(library_, {QStringLiteral("GA_ZeroPos"), QStringLiteral("_GA_ZeroPos@8")});
+        gaClrSts_ = resolveFunction<GAClrStsFn>(library_, {QStringLiteral("GA_ClrSts"), QStringLiteral("_GA_ClrSts@8")});
         if (gaOpen_ != nullptr && gaReset_ != nullptr && gaClose_ != nullptr && gaGetDiRaw_ != nullptr) {
             emit boardLog(QStringLiteral("已加载板卡库: %1").arg(QDir::toNativeSeparators(library_.fileName())));
             return true;
@@ -468,6 +672,8 @@ void BoardAdapter::unloadApi() {
     gaStop_ = nullptr;
     gaGetPrfPos_ = nullptr;
     gaGetSts_ = nullptr;
+    gaZeroPos_ = nullptr;
+    gaClrSts_ = nullptr;
     if (library_.isLoaded()) {
         library_.unload();
     }

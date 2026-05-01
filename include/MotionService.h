@@ -22,6 +22,7 @@ public:
     bool moveByRelDeg(double deltaDeg);
     bool startContinuous(double roundTimeSec);
     void stop(bool estop);
+    void refreshPosition();
 
     qint64 currentPulse() const;
     double currentTotalDeg() const;
@@ -47,6 +48,7 @@ private:
     void setMode(Mode mode);
     bool useHardware() const;
     void syncPositionFromHardware();
+    void scheduleHardwareMotionProbe(const QString& context, qint64 startPulse);
     void onTick();
 
     QTimer tickTimer_;

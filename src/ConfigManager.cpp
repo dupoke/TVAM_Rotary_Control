@@ -34,6 +34,19 @@ bool ConfigManager::load(AppConfig& outConfig, QString* error) const {
     config.pulsePerDeg = settings.value("motion/pulse_per_deg", config.pulsePerDeg).toDouble();
     config.velMaxPulseMs = settings.value("motion/vel_max_pulse_ms", config.velMaxPulseMs).toDouble();
     config.homeTimeoutMs = settings.value("motion/home_timeout_ms", config.homeTimeoutMs).toInt();
+    config.coarseHomeDiIndex = settings.value("motion/coarse_home_di_index", config.coarseHomeDiIndex).toInt();
+    config.coarseHomeDirection = settings.value("motion/coarse_home_direction", config.coarseHomeDirection).toInt();
+    config.coarseHomeMaxTurns = settings.value("motion/coarse_home_max_turns", config.coarseHomeMaxTurns).toDouble();
+    config.fineHomeDiIndex = settings.value("motion/fine_home_di_index", config.fineHomeDiIndex).toInt();
+    config.fineHomeActiveLow = settings.value("motion/fine_home_active_low", config.fineHomeActiveLow).toBool();
+    config.fineHomeDirection = settings.value("motion/fine_home_direction", config.fineHomeDirection).toInt();
+    config.fineHomeMaxTravelDeg =
+        settings.value("motion/fine_home_max_travel_deg", config.fineHomeMaxTravelDeg).toDouble();
+    config.fineHomeTimeoutMs =
+        settings.value("motion/fine_home_timeout_ms", config.fineHomeTimeoutMs).toInt();
+    config.zLaserDiIndex = settings.value("motion/z_laser_di_index", config.zLaserDiIndex).toInt();
+    config.zLaserActiveLow = settings.value("motion/z_laser_active_low", config.zLaserActiveLow).toBool();
+    config.laserStableMs = settings.value("motion/laser_stable_ms", config.laserStableMs).toInt();
 
     config.projectorBaudrate = settings.value("projector/baudrate", config.projectorBaudrate).toInt();
     config.projectorDataBits = settings.value("projector/data_bits", config.projectorDataBits).toInt();
@@ -66,6 +79,17 @@ bool ConfigManager::save(const AppConfig& config, QString* error) const {
     settings.setValue("motion/pulse_per_deg", normalized.pulsePerDeg);
     settings.setValue("motion/vel_max_pulse_ms", normalized.velMaxPulseMs);
     settings.setValue("motion/home_timeout_ms", normalized.homeTimeoutMs);
+    settings.setValue("motion/coarse_home_di_index", normalized.coarseHomeDiIndex);
+    settings.setValue("motion/coarse_home_direction", normalized.coarseHomeDirection);
+    settings.setValue("motion/coarse_home_max_turns", normalized.coarseHomeMaxTurns);
+    settings.setValue("motion/fine_home_di_index", normalized.fineHomeDiIndex);
+    settings.setValue("motion/fine_home_active_low", normalized.fineHomeActiveLow);
+    settings.setValue("motion/fine_home_direction", normalized.fineHomeDirection);
+    settings.setValue("motion/fine_home_max_travel_deg", normalized.fineHomeMaxTravelDeg);
+    settings.setValue("motion/fine_home_timeout_ms", normalized.fineHomeTimeoutMs);
+    settings.setValue("motion/z_laser_di_index", normalized.zLaserDiIndex);
+    settings.setValue("motion/z_laser_active_low", normalized.zLaserActiveLow);
+    settings.setValue("motion/laser_stable_ms", normalized.laserStableMs);
 
     settings.setValue("projector/baudrate", normalized.projectorBaudrate);
     settings.setValue("projector/data_bits", normalized.projectorDataBits);
@@ -92,16 +116,45 @@ void ConfigManager::normalize(AppConfig& config) {
         config.pulsePerMotorRev = 1000;
     }
     if (config.gearRatio <= 0) {
-        config.gearRatio = 90;
+        config.gearRatio = 180;
     }
-    if (config.pulsePerDeg <= 0.0) {
-        config.pulsePerDeg = 250.0;
+    const double derivedPulsePerDeg =
+        static_cast<double>(config.pulsePerMotorRev) * static_cast<double>(config.gearRatio) / 360.0;
+    if (config.pulsePerDeg <= 0.0 || qAbs(config.pulsePerDeg - derivedPulsePerDeg) > 0.001) {
+        config.pulsePerDeg = derivedPulsePerDeg;
     }
     if (config.velMaxPulseMs <= 0.0) {
         config.velMaxPulseMs = 20.0;
     }
     if (config.homeTimeoutMs < 1000) {
         config.homeTimeoutMs = 30000;
+    }
+    if (config.coarseHomeDiIndex < 0 || config.coarseHomeDiIndex > 31) {
+        config.coarseHomeDiIndex = 1;
+    }
+    if (config.coarseHomeDirection != -1 && config.coarseHomeDirection != 1) {
+        config.coarseHomeDirection = -1;
+    }
+    if (config.coarseHomeMaxTurns <= 0.0) {
+        config.coarseHomeMaxTurns = 1.0;
+    }
+    if (config.fineHomeDiIndex < 0 || config.fineHomeDiIndex > 31) {
+        config.fineHomeDiIndex = 1;
+    }
+    if (config.fineHomeDirection != -1 && config.fineHomeDirection != 1) {
+        config.fineHomeDirection = -1;
+    }
+    if (config.fineHomeMaxTravelDeg <= 0.0) {
+        config.fineHomeMaxTravelDeg = 360.0;
+    }
+    if (config.fineHomeTimeoutMs < 1000) {
+        config.fineHomeTimeoutMs = 60000;
+    }
+    if (config.zLaserDiIndex < 0 || config.zLaserDiIndex > 31) {
+        config.zLaserDiIndex = 0;
+    }
+    if (config.laserStableMs < 0) {
+        config.laserStableMs = 0;
     }
 
     if (config.projectorBaudrate <= 0) {

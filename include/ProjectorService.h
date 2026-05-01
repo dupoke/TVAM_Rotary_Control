@@ -14,6 +14,7 @@ public:
 
     void applyConfig(const AppConfig& config);
     QStringList availablePorts() const;
+    QStringList autoDetectPorts() const;
 
     bool openPort(const QString& portName, QString* error = nullptr);
     void closePort();
@@ -34,4 +35,3 @@ private:
     QSerialPort serial_;
     AppConfig config_;
 };
-

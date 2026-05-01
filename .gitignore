@@ -1,13 +1,51 @@
 # Build outputs
 /build/
 /build_mingw/
+/build-*/
+/CMakeFiles/
+/cmake-build-*/
+/.cmake/
+CMakeCache.txt
+compile_commands.json
+cmake_install.cmake
+Makefile
+*.obj
+*.o
+*.lo
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.manifest
+*.cache
+*.autosave
+*.pro.user*
+*.vcxproj.user
+*.sln.docstates
 
 # IDE/user files
 /.qtcreator/
 *.user
+/.vs/
 
 # Runtime outputs
-/logs/*.log
+/logs/
+/captures/
+/backups/
+/dist/
+/tmp/
+*.log
+*.tmp
+
+# Local references and vendor runtime bundles not needed for source indexing
+/ref/
+/QCOM_V1.6/
+/third_party/opencv/
 
 # Windows noise
 Thumbs.db

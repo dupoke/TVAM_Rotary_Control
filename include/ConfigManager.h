@@ -5,10 +5,21 @@
 struct AppConfig {
     int axisIndex = 1;
     int pulsePerMotorRev = 1000;
-    int gearRatio = 90;
-    double pulsePerDeg = 250.0;
+    int gearRatio = 180;
+    double pulsePerDeg = 500.0;
     double velMaxPulseMs = 20.0;
     int homeTimeoutMs = 30000;
+    int coarseHomeDiIndex = 1;
+    int coarseHomeDirection = -1;
+    double coarseHomeMaxTurns = 1.0;
+    int fineHomeDiIndex = 1;
+    bool fineHomeActiveLow = false;
+    int fineHomeDirection = -1;
+    double fineHomeMaxTravelDeg = 360.0;
+    int fineHomeTimeoutMs = 60000;
+    int zLaserDiIndex = 0;
+    bool zLaserActiveLow = true;
+    int laserStableMs = 120;
 
     int projectorBaudrate = 115200;
     int projectorDataBits = 8;
@@ -33,4 +44,3 @@ private:
 
     QString configPath_;
 };
-

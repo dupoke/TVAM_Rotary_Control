@@ -14,6 +14,7 @@ public:
     explicit BoardAdapter(QObject* parent = nullptr);
 
     QStringList availablePorts() const;
+    QStringList autoDetectPorts() const;
     bool connectBoard(const QString& preferredPort = QString());
     void disconnectBoard();
 
@@ -29,6 +30,9 @@ public:
     bool stopAxis(int axisIndex, bool estop, QString* error = nullptr);
     bool getProfilePositionPulse(int axisIndex, double& outPulse, QString* error = nullptr);
     bool getAxisStatus(int axisIndex, long& outStatus, QString* error = nullptr);
+    bool zeroAxis(int axisIndex, QString* error = nullptr);
+    void setPollIntervalMs(int intervalMs);
+    int pollIntervalMs() const;
 
 signals:
     void connectionChanged(bool connected, const QString& portName);
@@ -64,6 +68,8 @@ private:
     using GAStopFn = int (*)(long, long);
     using GAGetPrfPosFn = int (*)(short, double*, short, unsigned long*);
     using GAGetStsFn = int (*)(short, long*, short, unsigned long*);
+    using GAZeroPosFn = int (*)(short, short);
+    using GAClrStsFn = int (*)(short, short);
 
     bool loadApi();
     void unloadApi();
@@ -73,6 +79,7 @@ private:
     static bool validateAxisIndex(int axisIndex);
     static long axisMask(int axisIndex);
     bool ensureMotionApi(QString* error);
+    bool ensureZeroApi(QString* error);
 
     void onPollTick();
 
@@ -98,4 +105,6 @@ private:
     GAStopFn gaStop_ = nullptr;
     GAGetPrfPosFn gaGetPrfPos_ = nullptr;
     GAGetStsFn gaGetSts_ = nullptr;
+    GAZeroPosFn gaZeroPos_ = nullptr;
+    GAClrStsFn gaClrSts_ = nullptr;
 };

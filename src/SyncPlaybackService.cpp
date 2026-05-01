@@ -3,7 +3,20 @@
 #include "MotionService.h"
 
 #include <QtGlobal>
+#include <cmath>
 #include <utility>
+
+namespace {
+
+double normalizeRelativeDeg(double value) {
+    double mod = std::fmod(value, 360.0);
+    if (mod < 0.0) {
+        mod += 360.0;
+    }
+    return mod;
+}
+
+}
 
 SyncPlaybackService::SyncPlaybackService(MotionService* motionService, QObject* parent)
     : QObject(parent),
@@ -58,9 +71,7 @@ bool SyncPlaybackService::start(double roundTimeSec, int loopCount, bool infinit
     startTotalDeg_ = motionService_->currentTotalDeg();
 
     emit stateChanged(QStringLiteral("SYNC_RUNNING"));
-    emit progressChanged(currentLoop_, loopTarget_, motionService_->currentCycleDeg());
-    emit syncLog(QStringLiteral("同步流程已启动，模式: %1。")
-                     .arg(infinite_ ? QStringLiteral("无限循环") : QStringLiteral("有限循环")));
+    emit progressChanged(currentLoop_, loopTarget_, 0.0);
     return true;
 }
 
@@ -73,12 +84,7 @@ void SyncPlaybackService::stop(bool completed) {
     motionService_->stop(false);
 
     emit stateChanged(QStringLiteral("READY"));
-    if (completed) {
-        emit syncLog(QStringLiteral("同步流程已完成。"));
-    } else {
-        emit syncLog(QStringLiteral("同步流程已停止。"));
-    }
-    emit syncFinished();
+    emit syncFinished(completed);
 }
 
 bool SyncPlaybackService::isRunning() const {
@@ -117,12 +123,12 @@ void SyncPlaybackService::onMotionPositionChanged(qint64, double totalDeg, doubl
     if (nextFrameIndex_ >= frames_.size()) {
         nextFrameIndex_ = 0;
         ++currentLoop_;
-        emit syncLog(QStringLiteral("已完成第 %1 圈。").arg(currentLoop_));
         if (!infinite_ && currentLoop_ >= loopTarget_) {
             stop(true);
             return;
         }
     }
 
-    emit progressChanged(currentLoop_, loopTarget_, cycleDeg);
+    Q_UNUSED(cycleDeg);
+    emit progressChanged(currentLoop_, loopTarget_, normalizeRelativeDeg(relativeDeg));
 }
