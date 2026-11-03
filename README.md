@@ -22,7 +22,7 @@ Current `v0.1` scope:
 - Mechanical home uses `coarse_home_di_index=1` by default.
 - Through-hole fine zero uses the independent `fine_home_speed_deg_s` speed and `fine_home_poll_interval_ms` DI polling interval while searching for the `DI0` through-hole signal. If no hole is found, it stops and prompts the operator to adjust Z.
 - After the hole is found, the workflow records one edge, reverses through the hole, records the opposite edge, returns to `P0=(P1+P2)/2`, zeroes the axis, and prompts the operator to adjust Z.
-- Projector power must be enabled from the software before `Start Projection` is available. After confirmation, the application preloads the first frame while the LED is off, sets brightness, turns the LED on, waits 200 ms for it to settle, and starts rotary synchronization without showing a deliberate black frame.
+- Projector power must be enabled from the software before `Start Projection` is available. After confirmation, the application preloads the first frame while the LED is off, sets brightness, turns the LED on, and immediately starts rotary synchronization without a deliberate black frame or fixed startup delay.
 
 ## Projection Sequence Support
 

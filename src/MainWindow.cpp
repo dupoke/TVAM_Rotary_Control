@@ -42,9 +42,6 @@
 
 namespace {
 
-constexpr int kProjectorLedSettleMs = 200;
-constexpr int kProjectorCommandGapMs = 250;
-
 void installStepButtons(QAbstractSpinBox* spin, const QString& name) {
     if (spin == nullptr || spin->parentWidget() == nullptr) {
         return;
@@ -1923,12 +1920,11 @@ void MainWindow::wireSignals() {
                            "一圈时间：%3\n"
                            "图片目录：%4\n\n"
                            "请确认零点和 Z 位置。\n"
-                           "确认后会预载首帧并开启 LED，等待光机稳定 %5 秒后开始旋转同步。")
+                           "确认后会预载首帧、设置亮度并开启 LED，随后立即开始旋转同步。")
                 .arg(brightnessPercent)
                 .arg(loopText)
                 .arg(roundTimeText)
-                .arg(folderText)
-                .arg(kProjectorLedSettleMs / 1000.0, 0, 'f', 1),
+                .arg(folderText),
             QMessageBox::Ok | QMessageBox::Cancel,
             QMessageBox::Cancel);
         if (confirm != QMessageBox::Ok) {
@@ -1962,19 +1958,11 @@ void MainWindow::wireSignals() {
             QMessageBox::critical(this, QStringLiteral("开始投影失败"), message);
             updateBoardDependentUiState();
         };
-        auto waitDuringStart = [](int waitMs) {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-            QEventLoop waitLoop;
-            QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
-            waitLoop.exec(QEventLoop::AllEvents);
-        };
-
         QString error;
         if (!projectorService_.setBrightnessPercent(brightnessPercent, &error)) {
             abortSyncPrepare(QStringLiteral("启动投影前设置亮度失败: %1").arg(error));
             return;
         }
-        waitDuringStart(kProjectorCommandGapMs);
 
         error.clear();
         if (!projectorService_.setLed(true, &error)) {
@@ -1982,9 +1970,7 @@ void MainWindow::wireSignals() {
             return;
         }
         logService_.info(QStringLiteral("同步"),
-                         QStringLiteral("首帧已预载，LED 开启后稳定 %1 ms 即启动旋转同步。")
-                             .arg(kProjectorLedSettleMs));
-        waitDuringStart(kProjectorLedSettleMs);
+                         QStringLiteral("首帧已预载，LED 开启命令发送后立即启动旋转同步。"));
 
         if (!syncPlaybackService_.start(roundSec, spinLoopCount_->value(),
                                         chkInfiniteLoop_->isChecked(), &error)) {

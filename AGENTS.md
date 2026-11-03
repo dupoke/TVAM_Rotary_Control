@@ -31,7 +31,7 @@
 - `归零` marks the current position as software `0°` without motion or `GA_ZeroPos`; `回零` returns to relative `0°` by the shortest path.
 - Rotary through-hole fine zero scans the through-hole on `DI0` at reduced speed. If no hole is found within the configured travel, it stops and prompts the operator to adjust Z.
 - After the through-hole is found, through-hole fine zero records one hole edge, reverses through the hole, records the opposite edge, returns to the midpoint, zeroes the axis, then prompts the operator to adjust Z.
-- Start projection is enabled only after software projector power-on. After confirmation, the app preloads the first sequence frame while the LED is off, sets brightness, turns the LED on, waits 200 ms for it to settle, then starts synchronized rotation; no deliberate black frame is shown.
+- Start projection is enabled only after software projector power-on. After confirmation, the app preloads the first sequence frame while the LED is off, sets brightness, turns the LED on, and immediately starts synchronized rotation; no deliberate black frame or fixed startup delay is used.
 - Projection sequences support both `0deg.png` style names and continuous indexed names such as `0000.png` to `0179.png`.
 - In-app `EXR` loading is not supported; use an external `EXR -> PNG` conversion and select the resulting `png_sequence` folder.
 
