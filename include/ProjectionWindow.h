@@ -20,7 +20,7 @@ public:
 
     explicit ProjectionWindow(QWidget* parent = nullptr);
 
-    void showForProjection();
+    bool showForProjection(bool externalScreenOnly = false);
     void hideProjection();
     void showBlackFrame();
     bool displayImage(const QString& filePath);

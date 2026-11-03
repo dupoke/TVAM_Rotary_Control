@@ -42,6 +42,9 @@
 
 namespace {
 
+constexpr int kProjectorCommandGapMs = 250;
+constexpr int kProjectorBlackPrepMs = 200;
+
 void installStepButtons(QAbstractSpinBox* spin, const QString& name) {
     if (spin == nullptr || spin->parentWidget() == nullptr) {
         return;
@@ -1920,7 +1923,7 @@ void MainWindow::wireSignals() {
                            "一圈时间：%3\n"
                            "图片目录：%4\n\n"
                            "请确认零点和 Z 位置。\n"
-                           "确认后会预载首帧、设置亮度并开启 LED，随后立即开始旋转同步。")
+                           "确认后会先在投影屏显示黑帧，再设置亮度、开启 LED 并启动旋转同步。")
                 .arg(brightnessPercent)
                 .arg(loopText)
                 .arg(roundTimeText)
@@ -1934,43 +1937,68 @@ void MainWindow::wireSignals() {
         btnSyncStart_->setEnabled(false);
         btnSyncStop_->setEnabled(false);
         syncPlaybackService_.setFrames(checkedFrames_);
+        if (!projectionWindow_.showForProjection(true)) {
+            const QString message = QStringLiteral(
+                "未检测到独立的投影屏幕，已取消启动以避免主屏被黑帧覆盖。"
+                "请在 Windows 显示设置中将投影设备设为扩展屏幕后重试。");
+            logService_.warn(QStringLiteral("同步"), message);
+            QMessageBox::warning(this, QStringLiteral("未找到投影屏幕"), message);
+            updateBoardDependentUiState();
+            return;
+        }
         if (checkedFrames_.isEmpty() || !projectionWindow_.displayImage(checkedFrames_.first().filePath)) {
             const QString message = QStringLiteral("无法加载投影序列首帧，请重新检查图片序列。\n%1")
                                         .arg(checkedFrames_.isEmpty()
                                                  ? QStringLiteral("当前没有可用图片帧。")
                                                  : checkedFrames_.first().filePath);
+            projectionWindow_.hideProjection();
             logService_.error(QStringLiteral("同步"), message);
             QMessageBox::critical(this, QStringLiteral("开始投影失败"), message);
             updateBoardDependentUiState();
             return;
         }
-        projectionWindow_.showForProjection();
+        projectionWindow_.showBlackFrame();
         if (lblCurrentFrame_ != nullptr) {
-            lblCurrentFrame_->setText(QStringLiteral("首帧已就绪"));
+            lblCurrentFrame_->setText(QStringLiteral("投影黑帧预备"));
         }
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
 
         auto abortSyncPrepare = [this](const QString& message) {
             QString ledError;
-            projectorService_.setLed(false, &ledError);
+            if (projectorService_.setLed(false, &ledError)) {
+                projectorLedOnBySoftware_ = false;
+            } else if (!ledError.isEmpty()) {
+                logService_.error(QStringLiteral("光机"),
+                                  QStringLiteral("启动失败后关闭 LED 失败: %1").arg(ledError));
+            }
             projectionWindow_.hideProjection();
             logService_.error(QStringLiteral("同步"), message);
             QMessageBox::critical(this, QStringLiteral("开始投影失败"), message);
             updateBoardDependentUiState();
         };
+        auto waitDuringStart = [](int waitMs) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            QEventLoop waitLoop;
+            QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec(QEventLoop::AllEvents);
+        };
+
         QString error;
         if (!projectorService_.setBrightnessPercent(brightnessPercent, &error)) {
             abortSyncPrepare(QStringLiteral("启动投影前设置亮度失败: %1").arg(error));
             return;
         }
+        waitDuringStart(kProjectorCommandGapMs);
 
         error.clear();
         if (!projectorService_.setLed(true, &error)) {
             abortSyncPrepare(QStringLiteral("启动投影前打开LED失败: %1").arg(error));
             return;
         }
+        projectorLedOnBySoftware_ = true;
+        waitDuringStart(kProjectorBlackPrepMs);
         logService_.info(QStringLiteral("同步"),
-                         QStringLiteral("首帧已预载，LED 开启命令发送后立即启动旋转同步。"));
+                         QStringLiteral("投影屏黑帧预备完成，LED 已开启，开始旋转同步。"));
 
         if (!syncPlaybackService_.start(roundSec, spinLoopCount_->value(),
                                         chkInfiniteLoop_->isChecked(), &error)) {
@@ -1982,7 +2010,6 @@ void MainWindow::wireSignals() {
         syncElapsedTimer_.start();
         updateSyncElapsedLabel(0);
         syncElapsedUiTimer_.start();
-        projectionWindow_.showForProjection();
         btnSyncStop_->setEnabled(true);
         updateBoardDependentUiState();
     });
@@ -2721,6 +2748,8 @@ void MainWindow::shutdownProjector(bool powerOff) {
     QString error;
     if (!projectorService_.setLed(false, &error)) {
         logService_.error(QStringLiteral("光机"), QStringLiteral("关闭LED失败: %1").arg(error));
+    } else {
+        projectorLedOnBySoftware_ = false;
     }
     if (powerOff) {
         error.clear();

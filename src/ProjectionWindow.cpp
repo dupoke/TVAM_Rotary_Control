@@ -104,10 +104,14 @@ ProjectionWindow::ProjectionWindow(QWidget* parent)
     layout->addWidget(imageLabel_);
 }
 
-void ProjectionWindow::showForProjection() {
+bool ProjectionWindow::showForProjection(bool externalScreenOnly) {
     QScreen* targetScreen = pickProjectionScreen();
     const bool hasSecondaryScreen =
         targetScreen != nullptr && targetScreen != QGuiApplication::primaryScreen();
+
+    if (externalScreenOnly && !hasSecondaryScreen) {
+        return false;
+    }
 
     if (hasSecondaryScreen) {
         createWinId();
@@ -122,6 +126,7 @@ void ProjectionWindow::showForProjection() {
     }
     raise();
     activateWindow();
+    return true;
 }
 
 void ProjectionWindow::hideProjection() {
