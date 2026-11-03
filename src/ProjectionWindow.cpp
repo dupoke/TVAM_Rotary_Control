@@ -110,16 +110,39 @@ bool ProjectionWindow::showForProjection(bool externalScreenOnly) {
         targetScreen != nullptr && targetScreen != QGuiApplication::primaryScreen();
 
     if (externalScreenOnly && !hasSecondaryScreen) {
+        hide();
         return false;
     }
 
     if (hasSecondaryScreen) {
+        const QRect screenGeometry = targetScreen->geometry();
+        setWindowState(windowState() & ~Qt::WindowFullScreen);
+        if (externalScreenOnly && isVisible() && windowHandle() != nullptr &&
+            windowHandle()->screen() != targetScreen) {
+            hide();
+        }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        // Associate the widget before native creation to avoid the first-show primary-screen flash.
+        setScreen(targetScreen);
+#endif
+        setGeometry(screenGeometry);
         createWinId();
         if (windowHandle() != nullptr) {
             windowHandle()->setScreen(targetScreen);
+            windowHandle()->setPosition(screenGeometry.topLeft());
         }
-        setGeometry(targetScreen->geometry());
+        if (externalScreenOnly &&
+            (windowHandle() == nullptr || windowHandle()->screen() != targetScreen)) {
+            hide();
+            return false;
+        }
+        setGeometry(screenGeometry);
         showFullScreen();
+        if (externalScreenOnly &&
+            (windowHandle() == nullptr || windowHandle()->screen() != targetScreen)) {
+            hide();
+            return false;
+        }
     } else {
         resize(960, 540);
         show();

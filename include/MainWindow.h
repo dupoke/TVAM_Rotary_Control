@@ -75,8 +75,8 @@ private:
     void handleSafetyTrip(const QString& reason);
     void updateBoardDependentUiState();
     void updateJogButtonStyle();
-    void shutdownProjector(bool powerOff);
-    void stopSyncWorkflow(bool powerOffProjector);
+    void shutdownProjector();
+    void stopSyncWorkflow();
     void updateSyncElapsedLabel(qint64 elapsedMs = -1);
     bool autoConnectBoard();
     bool autoConnectProjector();

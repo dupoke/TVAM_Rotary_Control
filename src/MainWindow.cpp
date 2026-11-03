@@ -534,7 +534,7 @@ void MainWindow::wireSignals() {
                     lastBoardPort_ = portName.trimmed().toUpper();
                 } else {
                     if (syncPlaybackService_.isRunning()) {
-                        stopSyncWorkflow(false);
+                        stopSyncWorkflow();
                     }
                     if (coarseHoming_) {
                         finishCoarseHoming(false, QStringLiteral("机械回零中断: 板卡已断开。"));
@@ -766,10 +766,12 @@ void MainWindow::wireSignals() {
         updateSyncElapsedLabel(syncElapsedMs_);
         btnSyncStop_->setEnabled(false);
         projectionWindow_.hideProjection();
+        shutdownProjector();
         if (completed) {
-            shutdownProjector(false);
             // 投影结束后不再自动回零，直接停止即可
             logService_.info(QStringLiteral("同步"), QStringLiteral("投影结束。"));
+        } else {
+            logService_.info(QStringLiteral("同步"), QStringLiteral("投影已中断，LED 已关闭，光机保持开启。"));
         }
         updateBoardDependentUiState();
     });
@@ -1937,15 +1939,6 @@ void MainWindow::wireSignals() {
         btnSyncStart_->setEnabled(false);
         btnSyncStop_->setEnabled(false);
         syncPlaybackService_.setFrames(checkedFrames_);
-        if (!projectionWindow_.showForProjection(true)) {
-            const QString message = QStringLiteral(
-                "未检测到独立的投影屏幕，已取消启动以避免主屏被黑帧覆盖。"
-                "请在 Windows 显示设置中将投影设备设为扩展屏幕后重试。");
-            logService_.warn(QStringLiteral("同步"), message);
-            QMessageBox::warning(this, QStringLiteral("未找到投影屏幕"), message);
-            updateBoardDependentUiState();
-            return;
-        }
         if (checkedFrames_.isEmpty() || !projectionWindow_.displayImage(checkedFrames_.first().filePath)) {
             const QString message = QStringLiteral("无法加载投影序列首帧，请重新检查图片序列。\n%1")
                                         .arg(checkedFrames_.isEmpty()
@@ -1958,6 +1951,15 @@ void MainWindow::wireSignals() {
             return;
         }
         projectionWindow_.showBlackFrame();
+        if (!projectionWindow_.showForProjection(true)) {
+            const QString message = QStringLiteral(
+                "未检测到独立的投影屏幕，已取消启动以避免主屏被黑帧覆盖。"
+                "请在 Windows 显示设置中将投影设备设为扩展屏幕后重试。");
+            logService_.warn(QStringLiteral("同步"), message);
+            QMessageBox::warning(this, QStringLiteral("未找到投影屏幕"), message);
+            updateBoardDependentUiState();
+            return;
+        }
         if (lblCurrentFrame_ != nullptr) {
             lblCurrentFrame_->setText(QStringLiteral("投影黑帧预备"));
         }
@@ -2015,7 +2017,7 @@ void MainWindow::wireSignals() {
     });
 
     connect(btnSyncStop_, &QPushButton::clicked, this, [this]() {
-        stopSyncWorkflow(false);
+        stopSyncWorkflow();
     });
     connect(chkInfiniteLoop_, &QCheckBox::toggled, this,
             [this](bool checked) { spinLoopCount_->setEnabled(!checked); });
@@ -2025,9 +2027,9 @@ void MainWindow::wireSignals() {
     connect(escStopShortcut, &QShortcut::activated, this,
             [this, restoreProjectionPreview, refreshAlignmentPreview]() {
         if (syncPlaybackService_.isRunning()) {
-            stopSyncWorkflow(true);
+            stopSyncWorkflow();
             logService_.warn(QStringLiteral("同步"),
-                             QStringLiteral("已通过 Esc 停止同步，光机已关机并关闭LED。"));
+                             QStringLiteral("已通过 Esc 停止同步，LED 已关闭，光机保持开启。"));
             return;
         }
         if (projectionWindow_.isAlignmentActive()) {
@@ -2535,7 +2537,7 @@ void MainWindow::handleSafetyTrip(const QString& reason) {
     safetyTripped_ = true;
 
     if (syncPlaybackService_.isRunning()) {
-        stopSyncWorkflow(false);
+        stopSyncWorkflow();
     }
     if (coarseHoming_) {
         finishCoarseHoming(false, QStringLiteral("安全联锁中断: %1").arg(reason));
@@ -2744,24 +2746,22 @@ bool MainWindow::autoConnectProjector() {
     return false;
 }
 
-void MainWindow::shutdownProjector(bool powerOff) {
+void MainWindow::shutdownProjector() {
+    if (!projectorLedOnBySoftware_) {
+        return;
+    }
+
     QString error;
     if (!projectorService_.setLed(false, &error)) {
         logService_.error(QStringLiteral("光机"), QStringLiteral("关闭LED失败: %1").arg(error));
     } else {
         projectorLedOnBySoftware_ = false;
     }
-    if (powerOff) {
-        error.clear();
-        if (!projectorService_.setPower(false, &error)) {
-            logService_.error(QStringLiteral("光机"), QStringLiteral("关闭光机失败: %1").arg(error));
-        }
-        projectorPowerOnBySoftware_ = false;
-    }
 }
 
-void MainWindow::stopSyncWorkflow(bool powerOffProjector) {
+void MainWindow::stopSyncWorkflow() {
     if (!syncPlaybackService_.isRunning()) {
+        shutdownProjector();
         projectionWindow_.hideProjection();
         btnSyncStop_->setEnabled(false);
         updateBoardDependentUiState();
@@ -2769,10 +2769,6 @@ void MainWindow::stopSyncWorkflow(bool powerOffProjector) {
     }
 
     syncPlaybackService_.stop(false);
-    shutdownProjector(powerOffProjector);
-    projectionWindow_.hideProjection();
-    btnSyncStop_->setEnabled(false);
-    updateBoardDependentUiState();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -2780,12 +2776,12 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     cameraProfileSaveTimer_.stop();
     saveCameraProfile();
     if (syncPlaybackService_.isRunning()) {
-        stopSyncWorkflow(false);
+        stopSyncWorkflow();
     }
     projectionWindow_.clearAlignment();
     projectionWindow_.hideProjection();
     projectionWindow_.close();
-    shutdownProjector(false);
+    shutdownProjector();
     projectorService_.closePort();
     cameraService_.closeCamera();
     boardAdapter_.disconnectBoard();
