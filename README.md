@@ -8,8 +8,8 @@ TVAM Rotary Control is a Windows desktop application for synchronized rotary mot
 
 Current `v0.1` scope:
 
-- Motion board connection, DI polling, jog, absolute/relative move, stop and emergency stop
-- Fast home and precise home workflows for the rotary stage
+- Motion board connection, DI polling, jog, relative-angle zero/return-to-zero, stop and emergency stop
+- Mechanical home and through-hole fine-zero workflows for the rotary stage
 - Projector serial control for power, LED enable and brightness
 - Synchronized projection playback with continuous positive rotary motion
 - Camera preview, capture and recording workflow
@@ -17,11 +17,12 @@ Current `v0.1` scope:
 
 ## Current Runtime Behavior
 
-- Z calibration uses `z_laser_di_index=0`; rotary precise home uses `fine_home_di_index=1`.
-- Fast home uses `coarse_home_di_index=1` by default.
-- Precise home rotates in the positive direction at a reduced speed, records `P1` when `DI1` enters the limit-triggered region, records `P2` when `DI1` exits that region, returns to `P0=(P1+P2)/2`, then zeroes the axis.
-- If rotary precise home starts while `DI1` is already triggered, the current pulse is treated as `P1`; the workflow continues to search for the exit edge.
-- Synchronized projection requires projector power to be enabled from the software first. Power-on sends LED off by default. Start sync shows black frames, turns LED on, waits 3 black frames, then starts rotary synchronization and normal projection.
+- The motion area shows a `0~360°` current relative angle. `Zero` only marks the current position as `0°`; `Return to zero` moves back to relative zero by the shortest path.
+- Z calibration and through-hole fine zero share `DI0`, configured as `z_laser_di_index=0` and `fine_home_di_index=0`.
+- Mechanical home uses `coarse_home_di_index=1` by default.
+- Through-hole fine zero uses the independent `fine_home_speed_deg_s` speed and `fine_home_poll_interval_ms` DI polling interval while searching for the `DI0` through-hole signal. If no hole is found, it stops and prompts the operator to adjust Z.
+- After the hole is found, the workflow records one edge, reverses through the hole, records the opposite edge, returns to `P0=(P1+P2)/2`, zeroes the axis, and prompts the operator to adjust Z.
+- Projector power must be enabled from the software before `Start Projection` is available. After confirmation, the application preloads the first frame while the LED is off, sets brightness, turns the LED on, waits 200 ms for it to settle, and starts rotary synchronization without showing a deliberate black frame.
 
 ## Projection Sequence Support
 

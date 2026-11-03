@@ -20,11 +20,15 @@ public:
     bool jogStart(int direction, double velPulsePerMs);
     bool moveToAbsDeg(double targetDeg);
     bool moveByRelDeg(double deltaDeg);
+    bool startRevolution(double roundTimeSec);
+    void setRelativeZero();
+    bool moveToRelativeZeroShortest();
     bool startContinuous(double roundTimeSec);
     void stop(bool estop);
     void refreshPosition();
 
     qint64 currentPulse() const;
+    bool positionTargetReached() const;
     double currentTotalDeg() const;
     double currentCycleDeg() const;
     QString stateText() const;
@@ -56,6 +60,7 @@ private:
 
     qint64 currentPulse_ = 0;
     qint64 targetPulse_ = 0;
+    qint64 relativeZeroPulse_ = 0;
 
     double pulsePerDeg_ = 250.0;
     double maxVelPulsePerSec_ = 20000.0;
@@ -66,7 +71,9 @@ private:
 
     int jogDirection_ = 1;
     double continuousPulsePerSec_ = 0.0;
+    double activePositionPulsePerSec_ = 0.0;
     int axisIndex_ = 1;
     BoardAdapter* boardAdapter_ = nullptr;
     int hardwareReadErrorCount_ = 0;
+    bool positionTargetReached_ = false;
 };

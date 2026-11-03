@@ -14,8 +14,8 @@
 
 | 信号 | 默认 DI | 说明 |
 | --- | --- | --- |
-| 孔位激光对射 | `DI0` | Z 到位确认使用，默认 `z_laser_active_low=true` |
-| 旋转台限位开关 | `DI1` | 快速回零与精确回零使用，默认 `fine_home_active_low=false` |
+| PNP 孔位激光对射 | `DI0` | Z 到位确认与通孔精零定位共用；现场实测遮挡为 raw `DI0 ON`，通光/通孔为 raw `DI0 OFF`，软件默认 `z_laser_active_low=true`，`fine_home_active_low=true` |
+| 旋转台限位开关 | `DI1` | 机械回零使用，默认 `coarse_home_di_index=1` |
 | 急停 | `DI2` | 触发后进入安全停机 |
 | 伺服报警 | `DI3` | 触发后进入安全停机 |
 

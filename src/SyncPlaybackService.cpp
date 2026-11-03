@@ -24,6 +24,8 @@ SyncPlaybackService::SyncPlaybackService(MotionService* motionService, QObject* 
     Q_ASSERT(motionService_ != nullptr);
     connect(motionService_, &MotionService::positionChanged,
             this, &SyncPlaybackService::onMotionPositionChanged);
+    connect(motionService_, &MotionService::motionFinished,
+            this, &SyncPlaybackService::onMotionFinished);
 }
 
 void SyncPlaybackService::setFrames(QVector<ImageFrame> frames) {
@@ -56,19 +58,22 @@ bool SyncPlaybackService::start(double roundTimeSec, int loopCount, bool infinit
         return false;
     }
 
-    if (!motionService_->startContinuous(roundTimeSec)) {
-        if (error != nullptr) {
-            *error = QStringLiteral("启动连续旋转失败。");
-        }
-        return false;
-    }
-
+    motionService_->refreshPosition();
     running_ = true;
     infinite_ = infinite;
     loopTarget_ = infinite ? 0 : loopCount;
     currentLoop_ = 0;
     nextFrameIndex_ = 0;
     startTotalDeg_ = motionService_->currentTotalDeg();
+    roundTimeSec_ = roundTimeSec;
+
+    if (!motionService_->startRevolution(roundTimeSec_)) {
+        running_ = false;
+        if (error != nullptr) {
+            *error = QStringLiteral("启动单圈定长旋转失败，请检查一圈时间和板卡速度上限。");
+        }
+        return false;
+    }
 
     emit stateChanged(QStringLiteral("SYNC_RUNNING"));
     emit progressChanged(currentLoop_, loopTarget_, 0.0);
@@ -81,6 +86,9 @@ void SyncPlaybackService::stop(bool completed) {
     }
 
     running_ = false;
+
+    // 无论是否完成，都立即停止运动
+    // 不进行额外的回零动作，让停止点更精准
     motionService_->stop(false);
 
     emit stateChanged(QStringLiteral("READY"));
@@ -120,15 +128,30 @@ void SyncPlaybackService::onMotionPositionChanged(qint64, double totalDeg, doubl
         ++nextFrameIndex_;
     }
 
-    if (nextFrameIndex_ >= frames_.size()) {
-        nextFrameIndex_ = 0;
-        ++currentLoop_;
-        if (!infinite_ && currentLoop_ >= loopTarget_) {
-            stop(true);
-            return;
-        }
-    }
-
     Q_UNUSED(cycleDeg);
     emit progressChanged(currentLoop_, loopTarget_, normalizeRelativeDeg(relativeDeg));
+}
+
+void SyncPlaybackService::onMotionFinished() {
+    if (!running_) {
+        return;
+    }
+    if (!motionService_->positionTargetReached()) {
+        stop(false);
+        return;
+    }
+
+    ++currentLoop_;
+    if (!infinite_ && currentLoop_ >= loopTarget_) {
+        emit progressChanged(currentLoop_, loopTarget_, 0.0);
+        stop(true);
+        return;
+    }
+
+    nextFrameIndex_ = 0;
+    emit progressChanged(currentLoop_, loopTarget_, 0.0);
+    if (!motionService_->startRevolution(roundTimeSec_)) {
+        emit syncLog(QStringLiteral("下一圈定长运动启动失败，已安全结束同步。"));
+        stop(false);
+    }
 }

@@ -161,7 +161,7 @@
             <item>
              <widget class="QLabel" name="lblLaserState">
               <property name="text">
-               <string>对射状态: 未连接</string>
+               <string>通孔对射(DI0): 未连接</string>
               </property>
              </widget>
             </item>
@@ -222,11 +222,11 @@
               </widget>
              </item>
              <item row="0" column="2">
-              <widget class="QPushButton" name="btnMoveAbs">
-               <property name="text">
-                <string>绝对移动</string>
-               </property>
-              </widget>
+             <widget class="QPushButton" name="btnMoveAbs">
+              <property name="text">
+                <string>归零</string>
+              </property>
+             </widget>
              </item>
              <item row="0" column="3">
               <widget class="QPushButton" name="btnJogPlus">
@@ -236,21 +236,27 @@
               </widget>
              </item>
              <item row="0" column="4">
-              <widget class="QPushButton" name="btnCoarseCheck">
-               <property name="text">
-                <string>快速回零</string>
-               </property>
-              </widget>
+             <widget class="QPushButton" name="btnCoarseCheck">
+              <property name="text">
+                <string>机械回零</string>
+              </property>
+             </widget>
              </item>
              <item row="1" column="0">
               <widget class="QLabel" name="labelAbsAngle">
+               <property name="visible">
+                <bool>false</bool>
+               </property>
                <property name="text">
-                <string>绝对</string>
+                <string/>
                </property>
               </widget>
              </item>
              <item row="1" column="1">
               <widget class="QDoubleSpinBox" name="editTargetAbsDeg">
+               <property name="visible">
+                <bool>false</bool>
+               </property>
                <property name="decimals">
                 <number>3</number>
                </property>
@@ -263,11 +269,11 @@
               </widget>
              </item>
              <item row="1" column="2">
-              <widget class="QPushButton" name="btnMoveRel">
-               <property name="text">
-                <string>相对移动</string>
-               </property>
-              </widget>
+             <widget class="QPushButton" name="btnMoveRel">
+              <property name="text">
+                <string>回零</string>
+              </property>
+             </widget>
              </item>
              <item row="1" column="3">
               <widget class="QPushButton" name="btnJogMinus">
@@ -277,21 +283,27 @@
               </widget>
              </item>
              <item row="1" column="4">
-              <widget class="QPushButton" name="btnFineHome">
-               <property name="text">
-                <string>精确回零</string>
-               </property>
-              </widget>
+             <widget class="QPushButton" name="btnFineHome">
+              <property name="text">
+                <string>通孔精零</string>
+              </property>
+             </widget>
              </item>
              <item row="2" column="0">
               <widget class="QLabel" name="labelRelAngle">
+               <property name="visible">
+                <bool>false</bool>
+               </property>
                <property name="text">
-                <string>相对</string>
+                <string/>
                </property>
               </widget>
              </item>
              <item row="2" column="1">
               <widget class="QDoubleSpinBox" name="editTargetRelDeg">
+               <property name="visible">
+                <bool>false</bool>
+               </property>
                <property name="decimals">
                 <number>3</number>
                </property>
@@ -312,19 +324,22 @@
              </item>
              <item row="2" column="3">
               <widget class="QLabel" name="lblCurrentPulse">
+               <property name="visible">
+                <bool>false</bool>
+               </property>
                <property name="text">
-                <string>当前位置脉冲: 0</string>
+                <string/>
                </property>
               </widget>
              </item>
              <item row="2" column="4">
-              <widget class="QLabel" name="lblCurrentDeg">
-               <property name="text">
-                <string>当前角度: 0.000°</string>
-               </property>
-              </widget>
+             <widget class="QLabel" name="lblCurrentDeg">
+              <property name="text">
+                <string>当前相对角度: 0.000°</string>
+              </property>
+             </widget>
              </item>
-             <item row="3" column="0" colspan="5">
+              <item row="3" column="0" colspan="3">
               <widget class="QLabel" name="lblMotionConfig">
                <property name="text">
                 <string>参数: -</string>
@@ -339,26 +354,6 @@
             <property name="spacing">
              <number>8</number>
             </property>
-            <item>
-             <widget class="QLabel" name="lblHomeResult">
-              <property name="visible">
-               <bool>false</bool>
-              </property>
-              <property name="text">
-               <string>回零结果: N/A</string>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QLabel" name="lblZeroErrorDeg">
-              <property name="visible">
-               <bool>false</bool>
-              </property>
-              <property name="text">
-               <string>零点误差(°): N/A</string>
-              </property>
-             </widget>
-            </item>
             <item>
              <widget class="QLabel" name="lblZConfirmTime">
               <property name="visible">
@@ -564,7 +559,7 @@
           <item>
            <layout class="QHBoxLayout" name="opticSyncControlRowLayout">
             <property name="spacing">
-             <number>8</number>
+             <number>4</number>
             </property>
             <item>
              <widget class="QLabel" name="labelLoopCount">
@@ -603,10 +598,13 @@
             <item>
              <widget class="QDoubleSpinBox" name="editRoundTimeSec">
               <property name="decimals">
-               <number>3</number>
+               <number>1</number>
               </property>
               <property name="minimum">
-               <double>0.001000000000000</double>
+               <double>0.100000000000000</double>
+              </property>
+              <property name="singleStep">
+               <double>0.100000000000000</double>
               </property>
               <property name="maximum">
                <double>360000.000000000000000</double>
@@ -615,15 +613,15 @@
             </item>
             <item>
              <widget class="QPushButton" name="btnSyncStart">
-              <property name="text">
-               <string>开始</string>
+             <property name="text">
+               <string>开始投影</string>
               </property>
              </widget>
             </item>
             <item>
              <widget class="QPushButton" name="btnSyncStop">
-              <property name="text">
-               <string>停止</string>
+             <property name="text">
+               <string>停止投影</string>
               </property>
              </widget>
             </item>
@@ -637,28 +635,21 @@
             <item>
              <widget class="QLabel" name="lblCurrentFrame">
               <property name="text">
-               <string>当前投影: N/A</string>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QLabel" name="lblSyncState">
-              <property name="text">
-               <string>同步状态: READY</string>
+               <string>帧 —</string>
               </property>
              </widget>
             </item>
             <item>
              <widget class="QLabel" name="lblSyncProgress">
               <property name="text">
-               <string>同步进度: 0/0</string>
+               <string>循环 0/0</string>
               </property>
              </widget>
             </item>
             <item>
              <widget class="QLabel" name="lblSyncElapsed">
               <property name="text">
-               <string>同步耗时: 00:00:00</string>
+               <string>用时 00:00:00</string>
               </property>
              </widget>
             </item>
@@ -971,7 +962,7 @@
                   <item row="3" column="0">
                    <widget class="QLabel" name="labelCameraExposure">
                     <property name="text">
-                     <string>曝光补偿</string>
+                     <string>曝光</string>
                     </property>
                    </widget>
                   </item>

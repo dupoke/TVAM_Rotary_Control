@@ -17,17 +17,21 @@
 - Motion board runtime: `third_party/board/x64/GAS.dll`.
 - Board type: `COM_GAS_N`.
 - Projector: Wentins `4710`, controlled through serial commands `WT+PWRE`, `WT+LEDE`, `WT+LEDS`.
-- Current default brightness: `20%`.
+- Current default brightness: `100%`.
 - Current default round time: `20 s`.
-- Z through-beam input: `DI0`, configured by `z_laser_di_index=0`.
-- Rotary precise home input: `DI1`, configured by `fine_home_di_index=1`.
-- Coarse home input: `DI1`, configured by `coarse_home_di_index=1`.
+- Z / through-hole through-beam input: `DI0`, configured by `z_laser_di_index=0`.
+- Rotary through-hole fine-zero input: `DI0`, configured by `fine_home_di_index=0`.
+- Through-hole beam logic: blocked = raw `DI0 ON`, clear through hole = raw `DI0 OFF`; software uses `active_low=true`.
+- Mechanical home input: `DI1`, configured by `coarse_home_di_index=1`.
+- Rotary through-hole fine-zero speed: `fine_home_speed_deg_s=0.2`, with `fine_home_poll_interval_ms=5`.
 
 ## Current Behavior Notes
 
-- Rotary precise home scans DI1 in the positive direction at reduced speed, records switch entry and exit pulses, returns to the midpoint, then zeroes the axis.
-- If rotary precise home starts while `DI1` is already triggered, the current pulse is used as `P1`; the workflow continues to seek the exit edge.
-- Start sync is enabled only after software projector power-on. Power-on sends LED off. Sync confirmation shows black frames, turns LED on, waits 3 black frames, then starts synchronized rotation and normal projection.
+- The motion area uses a software-relative `0~360°` angle; pulses remain internal hardware counts.
+- `归零` marks the current position as software `0°` without motion or `GA_ZeroPos`; `回零` returns to relative `0°` by the shortest path.
+- Rotary through-hole fine zero scans the through-hole on `DI0` at reduced speed. If no hole is found within the configured travel, it stops and prompts the operator to adjust Z.
+- After the through-hole is found, through-hole fine zero records one hole edge, reverses through the hole, records the opposite edge, returns to the midpoint, zeroes the axis, then prompts the operator to adjust Z.
+- Start projection is enabled only after software projector power-on. After confirmation, the app preloads the first sequence frame while the LED is off, sets brightness, turns the LED on, waits 200 ms for it to settle, then starts synchronized rotation; no deliberate black frame is shown.
 - Projection sequences support both `0deg.png` style names and continuous indexed names such as `0000.png` to `0179.png`.
 - In-app `EXR` loading is not supported; use an external `EXR -> PNG` conversion and select the resulting `png_sequence` folder.
 

@@ -15,18 +15,25 @@ endif()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets SerialPort Multimedia MultimediaWidgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets SerialPort Multimedia MultimediaWidgets)
-set(_LOCAL_OPENCV_HINTS
-    "${CMAKE_SOURCE_DIR}/third_party/opencv/build/x64/vc16/lib"
-    "${CMAKE_SOURCE_DIR}/third_party/opencv/build"
-)
-foreach(_hint IN LISTS _LOCAL_OPENCV_HINTS)
-    if(EXISTS "${_hint}")
-        list(APPEND CMAKE_PREFIX_PATH "${_hint}")
-        set(OpenCV_DIR "${_hint}" CACHE PATH "OpenCV config path" FORCE)
-        break()
-    endif()
-endforeach()
-find_package(OpenCV QUIET)
+
+# OpenCV is optional for MinGW builds due to library compatibility
+set(ENABLE_OPENCV OFF CACHE BOOL "Enable OpenCV support")
+if(ENABLE_OPENCV)
+    set(_LOCAL_OPENCV_HINTS
+        "${CMAKE_SOURCE_DIR}/third_party/opencv/build/x64/vc16/lib"
+        "${CMAKE_SOURCE_DIR}/third_party/opencv/build"
+    )
+    foreach(_hint IN LISTS _LOCAL_OPENCV_HINTS)
+        if(EXISTS "${_hint}")
+            list(APPEND CMAKE_PREFIX_PATH "${_hint}")
+            set(OpenCV_DIR "${_hint}" CACHE PATH "OpenCV config path" FORCE)
+            break()
+        endif()
+    endforeach()
+    find_package(OpenCV QUIET)
+else()
+    set(OpenCV_FOUND FALSE)
+endif()
 
 set(QT_LIBS
     Qt${QT_VERSION_MAJOR}::Widgets
@@ -62,6 +69,10 @@ add_executable(RotaryTableControl WIN32
 
 target_include_directories(RotaryTableControl PRIVATE include)
 target_link_libraries(RotaryTableControl PRIVATE ${QT_LIBS})
+
+if(WIN32)
+    target_link_libraries(RotaryTableControl PRIVATE ole32 oleaut32 strmiids)
+endif()
 
 if(OpenCV_FOUND)
     target_include_directories(RotaryTableControl PRIVATE ${OpenCV_INCLUDE_DIRS})

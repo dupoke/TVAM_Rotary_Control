@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QMainWindow>
 #include <QTimer>
 #include <QVector>
@@ -24,6 +25,9 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QScrollArea;
+class QToolButton;
+class QVBoxLayout;
 class QWidget;
 class QCloseEvent;
 namespace Ui {
@@ -50,8 +54,10 @@ private:
 
     enum class FineHomeStage {
         Idle,
-        SeekFirstEdge,
-        SeekSecondEdge,
+        SeekHole,
+        SeekFirstExit,
+        SeekSecondEntry,
+        SeekSecondExit,
         MoveToMidpoint,
     };
 
@@ -65,7 +71,7 @@ private:
     bool startCoarseHoming();
     void finishCoarseHoming(bool success, const QString& message);
     bool startFineHoming();
-    void finishFineHoming(bool success, const QString& message);
+    void finishFineHoming(bool success, const QString& message, bool promptAdjustZ = false);
     void handleSafetyTrip(const QString& reason);
     void updateBoardDependentUiState();
     void updateJogButtonStyle();
@@ -82,6 +88,9 @@ private:
     void updateDiIndicators(quint32 raw);
     void appendUiLog(const QString& message);
     void chooseCameraSaveDirectory();
+    void rememberCameraControl(const QString& id, int value, bool autoMode);
+    void scheduleCameraProfileSave();
+    void saveCameraProfile();
 
     QWidget* createBoardMotionPanel();
     QWidget* createProjectorSyncPanel();
@@ -115,6 +124,9 @@ private:
     QDoubleSpinBox* editTargetRelDeg_ = nullptr;
     QPushButton* btnJogPlusMotion_ = nullptr;
     QPushButton* btnJogMinusMotion_ = nullptr;
+    QDoubleSpinBox* editJogStepDeg_ = nullptr;
+    QPushButton* btnStepPlusMotion_ = nullptr;
+    QPushButton* btnStepMinusMotion_ = nullptr;
     QPushButton* btnStopMotion_ = nullptr;
     QPushButton* btnEStopMotion_ = nullptr;
     QPushButton* btnMoveAbsMotion_ = nullptr;
@@ -124,10 +136,9 @@ private:
     QLabel* lblMotionConfig_ = nullptr;
     QDoubleSpinBox* editJogSpeedPulseMs_ = nullptr;
     QPushButton* btnCoarseCheck_ = nullptr;
+    QPushButton* btnCoarseMechanicalHome_ = nullptr;  // 新增：机械归零按钮
     QPushButton* btnFineHome_ = nullptr;
     QPushButton* btnConfirmZReady_ = nullptr;
-    QLabel* lblHomeResult_ = nullptr;
-    QLabel* lblZeroErrorDeg_ = nullptr;
     QLabel* lblLaserState_ = nullptr;
     QLabel* lblZConfirmTime_ = nullptr;
 
@@ -144,6 +155,20 @@ private:
     QDoubleSpinBox* spinCameraContrast_ = nullptr;
     QDoubleSpinBox* spinCameraExposure_ = nullptr;
     QDoubleSpinBox* spinCameraSaturation_ = nullptr;
+    QScrollArea* cameraControlPanel_ = nullptr;
+    QWidget* cameraControlContent_ = nullptr;
+    QVBoxLayout* cameraControlLayout_ = nullptr;
+    QComboBox* comboCameraResolution_ = nullptr;
+    QComboBox* comboCameraMode_ = nullptr;
+    QCheckBox* chkCameraFlipHorizontal_ = nullptr;
+    QCheckBox* chkCameraFlipVertical_ = nullptr;
+    QPushButton* btnCameraReset_ = nullptr;
+    QVariantMap cameraProfile_;
+    QString cameraProfileId_;
+    QTimer cameraProfileSaveTimer_;
+    QHash<QString, QDoubleSpinBox*> extraCameraControlSpins_;
+    QHash<QString, QCheckBox*> extraCameraControlAuto_;
+    QHash<QString, QToolButton*> cameraCategoryButtons_;
 
     QComboBox* comboProjectorPort_ = nullptr;
     QPushButton* btnProjectorRefresh_ = nullptr;
@@ -171,7 +196,6 @@ private:
     QDoubleSpinBox* editRoundTimeSec_ = nullptr;
     QPushButton* btnSyncStart_ = nullptr;
     QPushButton* btnSyncStop_ = nullptr;
-    QLabel* lblSyncState_ = nullptr;
     QLabel* lblSyncProgress_ = nullptr;
     QLabel* lblSyncElapsed_ = nullptr;
 
@@ -187,6 +211,7 @@ private:
     QString lastBoardPort_;
     QString lastProjectorPort_;
     bool projectorPowerOnBySoftware_ = false;
+    bool projectorLedOnBySoftware_ = false;
     quint32 lastDiRaw_ = 0;
     int jogUiDirection_ = 0;
     double coarseHomeJogSpeedPulseMs_ = 0.0;
@@ -198,6 +223,7 @@ private:
     qint64 coarseHomeFirstEdgePulse_ = 0;
     qint64 coarseHomeConfirmPulse_ = 0;
     double fineHomeJogSpeedPulseMs_ = 0.0;
+    int fineHomeScanDirection_ = 1;
     int fineHomeElapsedMs_ = 0;
     qint64 fineHomeStartPulse_ = 0;
     qint64 fineHomeFirstEdgePulse_ = 0;
@@ -208,6 +234,9 @@ private:
     bool laserTriggered_ = false;
     QElapsedTimer laserStableTimer_;
     bool cameraMonochrome_ = false;
+    int cameraImageMode_ = 0;
+    bool cameraFlipHorizontal_ = false;
+    bool cameraFlipVertical_ = false;
     bool cameraAutoOpenEvaluated_ = false;
     QElapsedTimer syncElapsedTimer_;
     qint64 syncElapsedMs_ = 0;

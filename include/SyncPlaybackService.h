@@ -30,6 +30,7 @@ signals:
 
 private:
     void onMotionPositionChanged(qint64 pulse, double totalDeg, double cycleDeg);
+    void onMotionFinished();
 
     MotionService* motionService_ = nullptr;
     QVector<ImageFrame> frames_;
@@ -40,4 +41,5 @@ private:
     int currentLoop_ = 0;
     int nextFrameIndex_ = 0;
     double startTotalDeg_ = 0.0;
+    double roundTimeSec_ = 0.0;
 };

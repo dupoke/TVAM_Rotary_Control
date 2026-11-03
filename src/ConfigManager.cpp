@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QCryptographicHash>
 #include <QSettings>
 #include <utility>
 
@@ -40,6 +41,10 @@ bool ConfigManager::load(AppConfig& outConfig, QString* error) const {
     config.fineHomeDiIndex = settings.value("motion/fine_home_di_index", config.fineHomeDiIndex).toInt();
     config.fineHomeActiveLow = settings.value("motion/fine_home_active_low", config.fineHomeActiveLow).toBool();
     config.fineHomeDirection = settings.value("motion/fine_home_direction", config.fineHomeDirection).toInt();
+    config.fineHomeSpeedDegPerSec =
+        settings.value("motion/fine_home_speed_deg_s", config.fineHomeSpeedDegPerSec).toDouble();
+    config.fineHomePollIntervalMs =
+        settings.value("motion/fine_home_poll_interval_ms", config.fineHomePollIntervalMs).toInt();
     config.fineHomeMaxTravelDeg =
         settings.value("motion/fine_home_max_travel_deg", config.fineHomeMaxTravelDeg).toDouble();
     config.fineHomeTimeoutMs =
@@ -54,6 +59,9 @@ bool ConfigManager::load(AppConfig& outConfig, QString* error) const {
     config.projectorStopBits = settings.value("projector/stop_bits", config.projectorStopBits).toInt();
     config.projectorFlowControl = settings.value("projector/flow_control", config.projectorFlowControl).toString();
     config.projectorSendWithEnter = settings.value("projector/send_with_enter", config.projectorSendWithEnter).toBool();
+
+    config.lastImageFolderPath = settings.value("paths/last_image_folder", config.lastImageFolderPath).toString();
+    config.lastCameraSavePath = settings.value("paths/last_camera_save", config.lastCameraSavePath).toString();
 
     normalize(config);
     outConfig = config;
@@ -85,6 +93,8 @@ bool ConfigManager::save(const AppConfig& config, QString* error) const {
     settings.setValue("motion/fine_home_di_index", normalized.fineHomeDiIndex);
     settings.setValue("motion/fine_home_active_low", normalized.fineHomeActiveLow);
     settings.setValue("motion/fine_home_direction", normalized.fineHomeDirection);
+    settings.setValue("motion/fine_home_speed_deg_s", normalized.fineHomeSpeedDegPerSec);
+    settings.setValue("motion/fine_home_poll_interval_ms", normalized.fineHomePollIntervalMs);
     settings.setValue("motion/fine_home_max_travel_deg", normalized.fineHomeMaxTravelDeg);
     settings.setValue("motion/fine_home_timeout_ms", normalized.fineHomeTimeoutMs);
     settings.setValue("motion/z_laser_di_index", normalized.zLaserDiIndex);
@@ -98,10 +108,71 @@ bool ConfigManager::save(const AppConfig& config, QString* error) const {
     settings.setValue("projector/flow_control", normalized.projectorFlowControl);
     settings.setValue("projector/send_with_enter", normalized.projectorSendWithEnter);
 
+    settings.setValue("paths/last_image_folder", normalized.lastImageFolderPath);
+    settings.setValue("paths/last_camera_save", normalized.lastCameraSavePath);
+
     settings.sync();
     if (settings.status() != QSettings::NoError) {
         if (error != nullptr) {
             *error = QStringLiteral("配置写入失败: %1").arg(configPath_);
+        }
+        return false;
+    }
+    return true;
+}
+
+QVariantMap ConfigManager::loadCameraProfile(const QString& deviceId) const {
+    QVariantMap profile;
+    const QString normalizedId = deviceId.trimmed();
+    if (normalizedId.isEmpty() || !QFileInfo::exists(configPath_)) {
+        return profile;
+    }
+
+    const QString profileKey = QString::fromLatin1(
+        QCryptographicHash::hash(normalizedId.toUtf8(), QCryptographicHash::Sha256).toHex());
+    QSettings settings(configPath_, QSettings::IniFormat);
+    settings.setFallbacksEnabled(false);
+    settings.beginGroup(QStringLiteral("camera/profiles/%1").arg(profileKey));
+    if (settings.value(QStringLiteral("device_id")).toString() != normalizedId) {
+        return profile;
+    }
+    for (const QString& key : settings.childKeys()) {
+        if (key != QStringLiteral("device_id")) {
+            profile.insert(key, settings.value(key));
+        }
+    }
+    return profile;
+}
+
+bool ConfigManager::saveCameraProfile(const QString& deviceId, const QVariantMap& profile,
+                                      QString* error) const {
+    const QString normalizedId = deviceId.trimmed();
+    if (normalizedId.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("相机设备标识为空，无法保存参数。");
+        }
+        return false;
+    }
+    if (!ensureParentDirectory(configPath_, error)) {
+        return false;
+    }
+
+    const QString profileKey = QString::fromLatin1(
+        QCryptographicHash::hash(normalizedId.toUtf8(), QCryptographicHash::Sha256).toHex());
+    QSettings settings(configPath_, QSettings::IniFormat);
+    settings.setFallbacksEnabled(false);
+    const QString group = QStringLiteral("camera/profiles/%1").arg(profileKey);
+    settings.remove(group);
+    settings.beginGroup(group);
+    settings.setValue(QStringLiteral("device_id"), normalizedId);
+    for (auto it = profile.cbegin(); it != profile.cend(); ++it) {
+        settings.setValue(it.key(), it.value());
+    }
+    settings.endGroup();
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        if (error != nullptr) {
+            *error = QStringLiteral("相机参数写入失败: %1").arg(configPath_);
         }
         return false;
     }
@@ -139,16 +210,24 @@ void ConfigManager::normalize(AppConfig& config) {
         config.coarseHomeMaxTurns = 1.0;
     }
     if (config.fineHomeDiIndex < 0 || config.fineHomeDiIndex > 31) {
-        config.fineHomeDiIndex = 1;
+        config.fineHomeDiIndex = 0;
     }
     if (config.fineHomeDirection != -1 && config.fineHomeDirection != 1) {
         config.fineHomeDirection = -1;
     }
+    if (config.fineHomeSpeedDegPerSec <= 0.0) {
+        config.fineHomeSpeedDegPerSec = 0.2;
+    }
+    if (config.fineHomePollIntervalMs < 1) {
+        config.fineHomePollIntervalMs = 1;
+    } else if (config.fineHomePollIntervalMs > 50) {
+        config.fineHomePollIntervalMs = 50;
+    }
     if (config.fineHomeMaxTravelDeg <= 0.0) {
         config.fineHomeMaxTravelDeg = 360.0;
     }
-    if (config.fineHomeTimeoutMs < 1000) {
-        config.fineHomeTimeoutMs = 60000;
+    if (config.fineHomeTimeoutMs < 0) {
+        config.fineHomeTimeoutMs = 0;
     }
     if (config.zLaserDiIndex < 0 || config.zLaserDiIndex > 31) {
         config.zLaserDiIndex = 0;

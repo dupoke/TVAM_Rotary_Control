@@ -23,8 +23,8 @@ template <typename FnType>
 FnType resolveFunction(QLibrary& lib, const QStringList& names) {
     for (const QString& name : names) {
         const QByteArray symbol = name.toLatin1();
-        if (void* ptr = lib.resolve(symbol.constData())) {
-            return reinterpret_cast<FnType>(ptr);
+        if (QFunctionPointer funcPtr = lib.resolve(symbol.constData())) {
+            return reinterpret_cast<FnType>(reinterpret_cast<void*>(funcPtr));
         }
     }
     return nullptr;

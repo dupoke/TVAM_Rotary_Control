@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QVariantMap>
 
 struct AppConfig {
     int axisIndex = 1;
@@ -12,11 +13,13 @@ struct AppConfig {
     int coarseHomeDiIndex = 1;
     int coarseHomeDirection = -1;
     double coarseHomeMaxTurns = 1.0;
-    int fineHomeDiIndex = 1;
-    bool fineHomeActiveLow = false;
+    int fineHomeDiIndex = 0;
+    bool fineHomeActiveLow = true;
     int fineHomeDirection = -1;
+    double fineHomeSpeedDegPerSec = 0.2;
+    int fineHomePollIntervalMs = 5;
     double fineHomeMaxTravelDeg = 360.0;
-    int fineHomeTimeoutMs = 60000;
+    int fineHomeTimeoutMs = 0;
     int zLaserDiIndex = 0;
     bool zLaserActiveLow = true;
     int laserStableMs = 120;
@@ -27,6 +30,10 @@ struct AppConfig {
     int projectorStopBits = 1;
     QString projectorFlowControl = "none";
     bool projectorSendWithEnter = true;
+
+    // 路径记忆
+    QString lastImageFolderPath;
+    QString lastCameraSavePath;
 };
 
 class ConfigManager final {
@@ -35,6 +42,9 @@ public:
 
     bool load(AppConfig& outConfig, QString* error = nullptr) const;
     bool save(const AppConfig& config, QString* error = nullptr) const;
+    QVariantMap loadCameraProfile(const QString& deviceId) const;
+    bool saveCameraProfile(const QString& deviceId, const QVariantMap& profile,
+                           QString* error = nullptr) const;
 
     static AppConfig defaultConfig();
 

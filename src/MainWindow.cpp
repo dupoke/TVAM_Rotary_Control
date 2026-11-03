@@ -2,8 +2,12 @@
 
 #include "ui_MainWindow.h"
 
+#include <algorithm>
+#include <cmath>
 #include <QCheckBox>
+#include <QAbstractSpinBox>
 #include <QCloseEvent>
+#include <QElapsedTimer>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -25,17 +29,116 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QStyle>
 #include <QSpinBox>
 #include <QTimer>
+#include <QScrollArea>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <memory>
 
 namespace {
 
-constexpr double kFineHomeJogSpeedScale = 0.5;
-constexpr int kPreSyncBlackFrames = 3;
-constexpr int kMinBlackFrameMs = 80;
+constexpr int kProjectorLedSettleMs = 200;
+constexpr int kProjectorCommandGapMs = 250;
+
+void installStepButtons(QAbstractSpinBox* spin, const QString& name) {
+    if (spin == nullptr || spin->parentWidget() == nullptr) {
+        return;
+    }
+    QLayout* parentLayout = spin->parentWidget()->layout();
+    if (parentLayout == nullptr) {
+        return;
+    }
+
+    auto* row = new QWidget(spin->parentWidget());
+    row->setObjectName(name + QStringLiteral("StepRow"));
+    auto* rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(0, 0, 0, 0);
+    rowLayout->setSpacing(4);
+    auto* minus = new QPushButton(QStringLiteral("−"), row);
+    auto* plus = new QPushButton(QStringLiteral("+"), row);
+    minus->setObjectName(name + QStringLiteral("Minus"));
+    plus->setObjectName(name + QStringLiteral("Plus"));
+    const int stepButtonWidth = name.startsWith(QStringLiteral("camera_")) ? 24 : 26;
+    for (QPushButton* button : {minus, plus}) {
+        button->setStyleSheet(
+            QStringLiteral("QPushButton{min-width:%1px;max-width:%1px;min-height:34px;padding:0;font-size:18px;}"
+                           "QPushButton[stepFeedback=\"true\"]{background:#2f80ed;color:white;border-color:#1d5fb8;}" )
+                .arg(stepButtonWidth));
+    }
+
+    // Some controls are nested in section grids; search nested layouts as well.
+    QLayoutItem* replacedItem = parentLayout->replaceWidget(spin, row);
+    if (replacedItem == nullptr) {
+        delete row;
+        return;
+    }
+    delete replacedItem;
+    rowLayout->addWidget(spin, 1);
+    rowLayout->addWidget(minus);
+    rowLayout->addWidget(plus);
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    spin->setCorrectionMode(QAbstractSpinBox::CorrectToNearestValue);
+
+    auto step = [spin](int direction, int multiplier) {
+        if (auto* doubleSpin = qobject_cast<QDoubleSpinBox*>(spin)) {
+            doubleSpin->setValue(doubleSpin->value() +
+                                 direction * doubleSpin->singleStep() * multiplier);
+        } else if (auto* intSpin = qobject_cast<QSpinBox*>(spin)) {
+            intSpin->setValue(intSpin->value() + direction * intSpin->singleStep() * multiplier);
+        }
+    };
+    auto installHold = [step](QPushButton* button, int direction) {
+        auto* repeatTimer = new QTimer(button);
+        repeatTimer->setTimerType(Qt::PreciseTimer);
+        auto elapsed = std::make_shared<QElapsedTimer>();
+        QObject::connect(button, &QPushButton::pressed, button,
+                         [button, repeatTimer, elapsed, direction, step]() {
+            elapsed->start();
+            step(direction, 1);
+            button->setProperty("stepFeedback", true);
+            button->style()->unpolish(button);
+            button->style()->polish(button);
+            repeatTimer->start(320);
+        });
+        QObject::connect(button, &QPushButton::released, button,
+                         [button, repeatTimer]() {
+            repeatTimer->stop();
+            QTimer::singleShot(140, button, [button]() {
+                button->setProperty("stepFeedback", false);
+                button->style()->unpolish(button);
+                button->style()->polish(button);
+            });
+        });
+        QObject::connect(repeatTimer, &QTimer::timeout, button,
+                         [button, repeatTimer, elapsed, direction, step]() {
+            const qint64 heldMs = elapsed->elapsed();
+            const int multiplier = heldMs >= 3000 ? 10 : heldMs >= 1800 ? 5 : heldMs >= 800 ? 2 : 1;
+            step(direction, multiplier);
+            repeatTimer->setInterval(heldMs >= 2500 ? 55 : heldMs >= 1200 ? 85 : 130);
+            button->setProperty("stepFeedback", !button->property("stepFeedback").toBool());
+            button->style()->unpolish(button);
+            button->style()->polish(button);
+        });
+    };
+    installHold(minus, -1);
+    installHold(plus, 1);
+}
+
+void setSpinStepButtonsEnabled(QDoubleSpinBox* spin, bool enabled) {
+    if (spin == nullptr || spin->parentWidget() == nullptr) {
+        return;
+    }
+    const auto buttons = spin->parentWidget()->findChildren<QPushButton*>(
+        QString(), Qt::FindDirectChildrenOnly);
+    for (QPushButton* button : buttons) {
+        button->setEnabled(enabled);
+    }
+}
 
 }
 
@@ -63,7 +166,7 @@ void MainWindow::setupUi() {
         "QGroupBox{font-weight:700;background:#ffffff;border:1px solid #d9dde3;border-radius:8px;margin-top:12px;}"
         "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;color:#1f2937;}"
         "QLabel{color:#2d3640;}"
-        "QPushButton{min-width:96px;min-height:36px;padding:0 14px;background:#f7f9fc;border:1px solid #c9d1da;border-radius:6px;}"
+        "QPushButton{min-width:72px;min-height:34px;padding:0 6px;background:#f7f9fc;border:1px solid #c9d1da;border-radius:6px;}"
         "QPushButton:hover{background:#eef3fa;}"
         "QPushButton:pressed{background:#e2eaf5;}"
         "QPushButton[role=\"primary\"]{background:#2f80ed;color:white;border:1px solid #2a70cf;}"
@@ -72,18 +175,24 @@ void MainWindow::setupUi() {
         "QPushButton[role=\"danger\"]{background:#e53935;color:white;border:1px solid #b52a28;font-weight:700;}"
         "QPushButton[role=\"danger\"]:hover{background:#d7302d;}"
         "QPushButton[role=\"danger\"]:pressed{background:#be2623;}"
-        "QLineEdit,QComboBox,QDoubleSpinBox,QSpinBox{min-height:36px;background:white;border:1px solid #c9d1da;border-radius:6px;padding:0 10px;}"
+        "QLineEdit,QComboBox,QDoubleSpinBox,QSpinBox{min-height:34px;min-width:88px;background:white;border:1px solid #c9d1da;border-radius:6px;padding:0 8px;}"
+        "QDoubleSpinBox::up-button,QSpinBox::up-button{width:28px;border-left:1px solid #c9d1da;}"
+        "QDoubleSpinBox::down-button,QSpinBox::down-button{width:28px;border-left:1px solid #c9d1da;}"
         "QPlainTextEdit{background:#ffffff;border:1px solid #c9d1da;border-radius:6px;}"));
 
-    ui_->mainHorizontalLayout->setStretch(0, 4);
-    ui_->mainHorizontalLayout->setStretch(1, 6);
+    ui_->mainHorizontalLayout->setStretch(0, 3);
+    ui_->mainHorizontalLayout->setStretch(1, 7);
+    ui_->leftPanel->setMinimumWidth(680);
     ui_->leftPanelLayout->setStretch(0, 4);
     ui_->leftPanelLayout->setStretch(1, 4);
     ui_->leftPanelLayout->setStretch(2, 5);
     ui_->rightPanelLayout->setStretch(0, 7);
     ui_->rightPanelLayout->setStretch(1, 3);
-    ui_->cameraBodyLayout->setStretch(0, 3);
-    ui_->cameraBodyLayout->setStretch(1, 1);
+    ui_->cameraBodyLayout->setStretch(0, 7);
+    ui_->cameraBodyLayout->setStretch(1, 3);
+    ui_->cameraSidePanel->setMinimumWidth(240);
+    ui_->cameraSidePanel->setMaximumWidth(280);
+    ui_->cameraSidePanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
     btnConnectCard_ = ui_->btnConnectCard;
     comboBoardPort_ = ui_->comboBoardPort;
@@ -98,6 +207,35 @@ void MainWindow::setupUi() {
     btnStopMotion_ = ui_->btnStop;
     btnEStopMotion_ = ui_->btnEStop;
     editJogSpeedPulseMs_ = ui_->editJogSpeedPulseMs;
+
+    // 添加寸动控件到运动控制网格布局
+    auto* motionGrid = qobject_cast<QGridLayout*>(motionSectionWidget_->layout());
+    if (motionGrid != nullptr) {
+        // 在第2行添加寸动控件
+        auto* lblJogStep = new QLabel(QStringLiteral("寸动"), motionSectionWidget_);
+        editJogStepDeg_ = new QDoubleSpinBox(motionSectionWidget_);
+        editJogStepDeg_->setDecimals(3);
+        editJogStepDeg_->setMinimum(-360.0);
+        editJogStepDeg_->setMaximum(360.0);
+        editJogStepDeg_->setSingleStep(0.1);
+        editJogStepDeg_->setValue(1.0);
+        editJogStepDeg_->setSuffix(QStringLiteral(" °"));
+
+        btnStepPlusMotion_ = new QPushButton(QStringLiteral("寸动+"), motionSectionWidget_);
+        btnStepMinusMotion_ = new QPushButton(QStringLiteral("寸动-"), motionSectionWidget_);
+
+        // 寸动控件位置：第2行，列2-3（左移一个位置）
+        int insertRow = 2;
+        motionGrid->addWidget(lblJogStep, insertRow, 0);
+        motionGrid->addWidget(editJogStepDeg_, insertRow, 1);
+        motionGrid->addWidget(btnStepPlusMotion_, insertRow, 2);  // 从col 3改为col 2
+        motionGrid->addWidget(btnStepMinusMotion_, insertRow, 3);  // 从col 4改为col 3
+
+        // 机械归零按钮稍后放到点动+右侧，避免与寸动控件挤在同一行。
+        btnCoarseMechanicalHome_ = new QPushButton(QStringLiteral("机械归零"), motionSectionWidget_);
+        btnCoarseMechanicalHome_->setObjectName(QStringLiteral("btnCoarseMechanicalHome"));
+    }
+
     editTargetAbsDeg_ = ui_->editTargetAbsDeg;
     editTargetRelDeg_ = ui_->editTargetRelDeg;
     btnMoveAbsMotion_ = ui_->btnMoveAbs;
@@ -107,12 +245,31 @@ void MainWindow::setupUi() {
     lblMotionConfig_ = ui_->lblMotionConfig;
     btnCoarseCheck_ = ui_->btnCoarseCheck;
     btnFineHome_ = ui_->btnFineHome;
-    btnCoarseCheck_->setText(QStringLiteral("快速回零"));
-    btnFineHome_->setText(QStringLiteral("精确回零"));
     btnConfirmZReady_ = ui_->btnConfirmZReady;
+    btnMoveAbsMotion_->setText(QStringLiteral("归零"));
+    btnMoveRelMotion_->setText(QStringLiteral("回零"));
+    btnFineHome_->setText(QStringLiteral("通孔精零"));
+    // 将回零控件一次性放到明确的位置；确认Z按钮当前没有可执行流程，保持隐藏。
+    if (motionGrid != nullptr) {
+        motionGrid->removeWidget(btnCoarseCheck_);
+        motionGrid->removeWidget(btnConfirmZReady_);
+        motionGrid->removeWidget(btnFineHome_);
+        motionGrid->removeWidget(lblCurrentPulse_);
+        motionGrid->removeWidget(editTargetAbsDeg_);
+        motionGrid->removeWidget(editTargetRelDeg_);
+        motionGrid->removeWidget(ui_->labelAbsAngle);
+        motionGrid->removeWidget(ui_->labelRelAngle);
+        motionGrid->removeWidget(lblCurrentDeg_);
+        btnCoarseCheck_->hide();
+        btnConfirmZReady_->hide();
+        btnFineHome_->setText(QStringLiteral("通孔精零"));
+        motionGrid->addWidget(btnCoarseMechanicalHome_, 0, 4);
+        motionGrid->addWidget(btnFineHome_, 1, 4);
+        motionGrid->addWidget(lblCurrentDeg_, 3, 3, 1, 2);
+        lblCurrentDeg_->show();
+        lblMotionConfig_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
     lblLaserState_ = ui_->lblLaserState;
-    lblHomeResult_ = ui_->lblHomeResult;
-    lblZeroErrorDeg_ = ui_->lblZeroErrorDeg;
     lblZConfirmTime_ = ui_->lblZConfirmTime;
 
     comboCameraList_ = ui_->comboCameraList;
@@ -123,6 +280,8 @@ void MainWindow::setupUi() {
     btnSnap_ = ui_->btnSnap;
     btnRec_ = ui_->btnRec;
     btnCameraModeToggle_ = ui_->btnCameraModeToggle;
+    btnCameraModeToggle_->setToolTip(
+        QStringLiteral("切换彩色/黑白模式，同时作用于预览、拍照和录像。"));
     editCameraSaveDir_ = ui_->editCameraSaveDir;
     spinCameraBrightness_ = ui_->spinCameraBrightness;
     spinCameraContrast_ = ui_->spinCameraContrast;
@@ -149,7 +308,6 @@ void MainWindow::setupUi() {
     chkInfiniteLoop_ = ui_->chkInfiniteLoop;
     editRoundTimeSec_ = ui_->editRoundTimeSec;
     lblCurrentFrame_ = ui_->lblCurrentFrame;
-    lblSyncState_ = ui_->lblSyncState;
     lblSyncProgress_ = ui_->lblSyncProgress;
     lblSyncElapsed_ = ui_->lblSyncElapsed;
     btnSyncStart_ = ui_->btnSyncStart;
@@ -157,6 +315,49 @@ void MainWindow::setupUi() {
     lblProjectionPreview_ = ui_->lblProjectionPreview;
     textLog_ = ui_->textLog;
 
+    // 将数值框右侧的上下箭头改为独立的“+ / −”按钮，并提供短暂按下反馈。
+    installStepButtons(editJogSpeedPulseMs_, QStringLiteral("editJogSpeedPulseMs"));
+    installStepButtons(editJogStepDeg_, QStringLiteral("editJogStepDeg"));
+    installStepButtons(editLedPercent_, QStringLiteral("editLedPercent"));
+    installStepButtons(spinLoopCount_, QStringLiteral("spinLoopCount"));
+    installStepButtons(editRoundTimeSec_, QStringLiteral("editRoundTimeSec"));
+    cameraControlPanel_ = new QScrollArea(ui_->cameraSidePanel);
+    cameraControlPanel_->setObjectName(QStringLiteral("cameraControlAccordion"));
+    cameraControlPanel_->setWidgetResizable(true);
+    cameraControlPanel_->setFrameShape(QFrame::NoFrame);
+    cameraControlContent_ = new QWidget(cameraControlPanel_);
+    cameraControlContent_->setObjectName(QStringLiteral("cameraControlContent"));
+    cameraControlLayout_ = new QVBoxLayout(cameraControlContent_);
+    cameraControlLayout_->setContentsMargins(0, 0, 0, 0);
+    cameraControlLayout_->setSpacing(2);
+    cameraControlPanel_->setWidget(cameraControlContent_);
+    cameraControlPanel_->setEnabled(false);
+    comboCameraResolution_ = new QComboBox(cameraControlContent_);
+    comboCameraResolution_->setObjectName(QStringLiteral("comboCameraResolution"));
+    comboCameraResolution_->addItem(QStringLiteral("打开相机后读取"));
+    comboCameraMode_ = new QComboBox(cameraControlContent_);
+    comboCameraMode_->setObjectName(QStringLiteral("comboCameraMode"));
+    comboCameraMode_->addItem(QStringLiteral("彩色"), 0);
+    comboCameraMode_->addItem(QStringLiteral("黑白"), 1);
+    comboCameraMode_->addItem(QStringLiteral("底片"), 2);
+    btnCameraReset_ = new QPushButton(QStringLiteral("恢复默认参数"), ui_->cameraSidePanel);
+    btnCameraReset_->setObjectName(QStringLiteral("btnCameraReset"));
+    btnCameraReset_->setMinimumHeight(34);
+    btnCameraReset_->setEnabled(false);
+    auto* cameraSideLayout = qobject_cast<QVBoxLayout*>(ui_->cameraSideLayout);
+    if (cameraSideLayout != nullptr) {
+        cameraSideLayout->removeWidget(ui_->btnCameraModeToggle);
+        ui_->btnCameraModeToggle->hide();
+        cameraSideLayout->removeWidget(ui_->groupCameraParams);
+        ui_->groupCameraParams->hide();
+        const int paramsIndex = cameraSideLayout->indexOf(ui_->lblCameraRecordTime);
+        const int insertAt = paramsIndex >= 0 ? paramsIndex + 1 : cameraSideLayout->count() - 1;
+        cameraSideLayout->insertWidget(insertAt, btnCameraReset_);
+        cameraSideLayout->insertWidget(insertAt + 1, cameraControlPanel_, 1);
+    }
+
+    btnSyncStart_->setText(QStringLiteral("开始投影"));
+    btnSyncStop_->setText(QStringLiteral("停止投影"));
     btnConnectCard_->setProperty("role", QStringLiteral("primary"));
     btnConfirmZReady_->setProperty("role", QStringLiteral("primary"));
     btnSyncStart_->setProperty("role", QStringLiteral("primary"));
@@ -180,31 +381,43 @@ void MainWindow::setupUi() {
     editJogSpeedPulseMs_->setSuffix(QStringLiteral(" °/s"));
     editTargetAbsDeg_->setSuffix(QStringLiteral(" °"));
     editTargetRelDeg_->setSuffix(QStringLiteral(" °"));
+    editTargetAbsDeg_->setVisible(false);
+    editTargetRelDeg_->setVisible(false);
+    lblCurrentPulse_->setVisible(false);
+    if (ui_->labelAbsAngle != nullptr) {
+        ui_->labelAbsAngle->setVisible(false);
+    }
+    if (ui_->labelRelAngle != nullptr) {
+        ui_->labelRelAngle->setVisible(false);
+    }
     editLedPercent_->setSuffix(QStringLiteral(" %"));
     editRoundTimeSec_->setSuffix(QStringLiteral(" s"));
+    editRoundTimeSec_->setDecimals(1);
+    editRoundTimeSec_->setRange(0.1, 360000.0);
+    editRoundTimeSec_->setSingleStep(0.1);
+    editRoundTimeSec_->setFixedWidth(90);
+    editRoundTimeSec_->setStyleSheet(
+        QStringLiteral("QDoubleSpinBox{min-width:90px;max-width:90px;padding:0 3px;}"));
+    spinLoopCount_->setFixedWidth(66);
+    spinLoopCount_->setStyleSheet(QStringLiteral("QSpinBox{min-width:66px;max-width:66px;padding:0 3px;}"));
+    editLedPercent_->setFixedWidth(74);
+    editLedPercent_->setStyleSheet(QStringLiteral("QSpinBox{min-width:74px;max-width:74px;padding:0 3px;}"));
+    btnSyncStart_->setMinimumWidth(90);
+    btnSyncStop_->setMinimumWidth(90);
     editImageFolder_->setPlaceholderText(
         QStringLiteral("选择图片文件夹（支持 0deg.png 或 0000.png）"));
 
     editCameraSaveDir_->setCursor(Qt::PointingHandCursor);
     editCameraSaveDir_->setToolTip(QStringLiteral("点击选择相机保存目录"));
     editCameraSaveDir_->installEventFilter(this);
-    lblLaserState_->setText(QStringLiteral("对射状态: 未连接"));
-    if (btnConfirmZReady_ != nullptr) {
-        btnConfirmZReady_->setEnabled(false);
-    }
-    if (lblHomeResult_ != nullptr) {
-        lblHomeResult_->setVisible(true);
-    }
-    if (lblZeroErrorDeg_ != nullptr) {
-        lblZeroErrorDeg_->setVisible(true);
-    }
-    if (lblZConfirmTime_ != nullptr) {
-        lblZConfirmTime_->setVisible(true);
-    }
+    lblLaserState_->setText(
+        QStringLiteral("通孔对射(DI%1): 未连接").arg(appConfig_.zLaserDiIndex));
 
     QWidget* preview = cameraService_.previewWidget();
     preview->setObjectName(QStringLiteral("cameraPreviewWidget"));
     preview->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    preview->setMinimumSize(200, 150); // 设置最小尺寸防止过小
+    preview->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); // 确保可以缩放
     auto* previewLayout = new QVBoxLayout(ui_->cameraPreviewHost);
     previewLayout->setContentsMargins(0, 0, 0, 0);
     previewLayout->addWidget(preview);
@@ -222,16 +435,15 @@ void MainWindow::initServices() {
     QString error;
     if (!logService_.initialize(&error)) {
         appendUiLog(QStringLiteral("[错误][系统] %1").arg(error));
-    } else {
-        logService_.info(QStringLiteral("系统"), QStringLiteral("日志服务初始化完成。"));
     }
 
     if (!configManager_.load(appConfig_, &error)) {
         appendUiLog(QStringLiteral("[错误][系统] %1").arg(error));
         appConfig_ = ConfigManager::defaultConfig();
-    } else {
-        logService_.info(QStringLiteral("系统"), QStringLiteral("配置加载完成。"));
     }
+    cameraProfileSaveTimer_.setSingleShot(true);
+    cameraProfileSaveTimer_.setInterval(500);
+    connect(&cameraProfileSaveTimer_, &QTimer::timeout, this, &MainWindow::saveCameraProfile);
     laserTriggered_ = false;
     laserStableTimer_.start();
 
@@ -242,7 +454,7 @@ void MainWindow::initServices() {
     projectorService_.applyConfig(appConfig_);
 
     editRoundTimeSec_->setValue(20.0);
-    editLedPercent_->setValue(20);
+    editLedPercent_->setValue(100);
     const double defaultJogPulseMs =
         qBound(1.0, appConfig_.velMaxPulseMs * 0.8, appConfig_.velMaxPulseMs);
     const double defaultJogDegPerSec =
@@ -258,13 +470,14 @@ void MainWindow::initServices() {
                 .arg(appConfig_.gearRatio)
                 .arg(appConfig_.pulsePerDeg, 0, 'f', 3));
     }
-    lblSyncState_->setText(QStringLiteral("同步状态: READY"));
-    lblSyncProgress_->setText(QStringLiteral("同步进度: 0/0"));
-    lblCurrentFrame_->setText(QStringLiteral("当前投影: N/A"));
+    lblSyncProgress_->setText(QStringLiteral("循环 0/0"));
+    lblCurrentFrame_->setText(QStringLiteral("帧 —"));
     if (lblCameraState_ != nullptr) {
         lblCameraState_->setText(QStringLiteral("相机状态: 未打开"));
     }
-    const QString defaultCameraSaveDir = QDir::current().filePath(QStringLiteral("captures"));
+    const QString defaultCameraSaveDir = appConfig_.lastCameraSavePath.isEmpty()
+                                          ? QDir::current().filePath(QStringLiteral("captures"))
+                                          : appConfig_.lastCameraSavePath;
     cameraService_.setSaveDirectory(defaultCameraSaveDir);
     if (editCameraSaveDir_ != nullptr) {
         editCameraSaveDir_->setText(QDir::toNativeSeparators(cameraService_.saveDirectory()));
@@ -276,8 +489,14 @@ void MainWindow::initServices() {
     if (btnCameraModeToggle_ != nullptr) {
         btnCameraModeToggle_->setText(QStringLiteral("模式: 彩色"));
     }
+
     if (lblProjectionPreview_ != nullptr) {
         lblProjectionPreview_->setText(QStringLiteral("实时投影预览"));
+    }
+
+    // 恢复上次的图片文件夹路径
+    if (!appConfig_.lastImageFolderPath.isEmpty() && editImageFolder_ != nullptr) {
+        editImageFolder_->setText(appConfig_.lastImageFolderPath);
     }
 
     btnSyncStop_->setEnabled(false);
@@ -293,33 +512,7 @@ void MainWindow::initServices() {
     updateBoardDependentUiState();
     updateSyncElapsedLabel(0);
 
-    logService_.info(
-        QStringLiteral("系统"),
-        QStringLiteral("运动参数: axis=%1, pulse_per_motor_rev=%2, gear_ratio=1:%3, pulse_per_deg=%4, vel_max=%5 °/s")
-            .arg(appConfig_.axisIndex)
-            .arg(appConfig_.pulsePerMotorRev)
-            .arg(appConfig_.gearRatio)
-            .arg(appConfig_.pulsePerDeg, 0, 'f', 3)
-            .arg(appConfig_.velMaxPulseMs * 1000.0 / appConfig_.pulsePerDeg, 0, 'f', 3));
-    logService_.info(
-        QStringLiteral("系统"),
-        QStringLiteral("回零参数: di=%1, direction=%2, max_turns=%3")
-            .arg(appConfig_.coarseHomeDiIndex)
-            .arg(appConfig_.coarseHomeDirection > 0 ? QStringLiteral("+") : QStringLiteral("-"))
-            .arg(appConfig_.coarseHomeMaxTurns, 0, 'f', 3));
-    logService_.info(
-            QStringLiteral("系统"),
-            QStringLiteral("精确回零参数: di=%1, active_low=%2, 扫描方向=+, 回中方向=-, max_travel=%3°, timeout=%4ms")
-            .arg(appConfig_.fineHomeDiIndex)
-            .arg(appConfig_.fineHomeActiveLow ? QStringLiteral("true") : QStringLiteral("false"))
-            .arg(appConfig_.fineHomeMaxTravelDeg, 0, 'f', 3)
-            .arg(appConfig_.fineHomeTimeoutMs));
-    logService_.info(
-        QStringLiteral("系统"),
-        QStringLiteral("Z对射参数: di=%1, active_low=%2, stable=%3ms")
-            .arg(appConfig_.zLaserDiIndex)
-            .arg(appConfig_.zLaserActiveLow ? QStringLiteral("true") : QStringLiteral("false"))
-            .arg(appConfig_.laserStableMs));
+    logService_.info(QStringLiteral("系统"), QStringLiteral("系统初始化完成。"));
 }
 
 void MainWindow::wireSignals() {
@@ -344,9 +537,9 @@ void MainWindow::wireSignals() {
                         stopSyncWorkflow(false);
                     }
                     if (coarseHoming_) {
-                        finishCoarseHoming(false, QStringLiteral("快速回零中断: 板卡已断开。"));
+                        finishCoarseHoming(false, QStringLiteral("机械回零中断: 板卡已断开。"));
                     } else if (fineHoming_) {
-                        finishFineHoming(false, QStringLiteral("精确回零中断: 板卡已断开。"));
+                        finishFineHoming(false, QStringLiteral("通孔精零中断: 板卡已断开。"));
                     } else if (motionService_.stateText() != QStringLiteral("READY")) {
                         motionService_.stop(true);
                     }
@@ -374,7 +567,7 @@ void MainWindow::wireSignals() {
                         coarseHomeConfirmRemainMs_ = 40;
                         logService_.info(
                             QStringLiteral("回零"),
-                            QStringLiteral("快速回零边沿触发，位置脉冲: %1")
+                            QStringLiteral("机械回零边沿触发，位置脉冲: %1")
                                 .arg(coarseHomeFirstEdgePulse_));
                     }
                 }
@@ -384,14 +577,37 @@ void MainWindow::wireSignals() {
                         motionService_.refreshPosition();
                         const qint64 pulse = motionService_.currentPulse();
                         fineHomeLastSwitchState_ = switchTriggered;
-                        if (fineHomeStage_ == FineHomeStage::SeekFirstEdge && switchTriggered) {
-                            fineHomeFirstEdgePulse_ = pulse;
-                            fineHomeStage_ = FineHomeStage::SeekSecondEdge;
+                        if (fineHomeStage_ == FineHomeStage::SeekHole && switchTriggered) {
+                            fineHomeStage_ = FineHomeStage::SeekFirstExit;
+                            fineHomeStartPulse_ = pulse;
                             logService_.info(
                                 QStringLiteral("回零"),
-                                QStringLiteral("精确回零进入限位触发区: 脉冲=%1。")
-                                    .arg(fineHomeFirstEdgePulse_));
-                        } else if (fineHomeStage_ == FineHomeStage::SeekSecondEdge && !switchTriggered) {
+                                QStringLiteral("通孔精零找到通孔: 脉冲=%1，继续%2向寻找第一侧边缘。")
+                                    .arg(pulse)
+                                    .arg(fineHomeScanDirection_ > 0 ? QStringLiteral("正") : QStringLiteral("反")));
+                        } else if (fineHomeStage_ == FineHomeStage::SeekFirstExit && !switchTriggered) {
+                            fineHomeFirstEdgePulse_ = pulse;
+                            motionService_.stop(false);
+                            fineHomeStage_ = FineHomeStage::SeekSecondEntry;
+                            fineHomeStartPulse_ = pulse;
+                            if (!motionService_.jogStart(-fineHomeScanDirection_, fineHomeJogSpeedPulseMs_)) {
+                                finishFineHoming(false, QStringLiteral("通孔精零失败: 无法反向寻找通孔另一侧边缘。"),
+                                                 true);
+                                return;
+                            }
+                            logService_.info(
+                                QStringLiteral("回零"),
+                                QStringLiteral("通孔精零第一侧边缘: 脉冲=%1，开始%2向穿过通孔。")
+                                    .arg(fineHomeFirstEdgePulse_)
+                                    .arg(fineHomeScanDirection_ > 0 ? QStringLiteral("反") : QStringLiteral("正")));
+                        } else if (fineHomeStage_ == FineHomeStage::SeekSecondEntry && switchTriggered) {
+                            fineHomeStage_ = FineHomeStage::SeekSecondExit;
+                            fineHomeStartPulse_ = pulse;
+                            logService_.info(
+                                QStringLiteral("回零"),
+                                QStringLiteral("通孔精零反向进入通孔: 脉冲=%1，继续寻找第二侧边缘。")
+                                    .arg(pulse));
+                        } else if (fineHomeStage_ == FineHomeStage::SeekSecondExit && !switchTriggered) {
                             fineHomeSecondEdgePulse_ = pulse;
                             fineHomeMidPulse_ =
                                 static_cast<qint64>((fineHomeFirstEdgePulse_ + fineHomeSecondEdgePulse_) / 2);
@@ -399,17 +615,17 @@ void MainWindow::wireSignals() {
                             fineHomeStage_ = FineHomeStage::MoveToMidpoint;
                             const double midDeg = static_cast<double>(fineHomeMidPulse_) / appConfig_.pulsePerDeg;
                             if (!motionService_.moveToAbsDeg(midDeg)) {
-                                finishFineHoming(false, QStringLiteral("精确回零失败: 无法反向回到中点。"));
+                                finishFineHoming(false, QStringLiteral("通孔精零失败: 无法回到通孔中点。"), true);
                                 return;
                             }
                             logService_.info(
                                 QStringLiteral("回零"),
-                                QStringLiteral("精确回零离开限位触发区: 脉冲=%1。")
+                                QStringLiteral("通孔精零第二侧边缘: 脉冲=%1。")
                                     .arg(fineHomeSecondEdgePulse_)
                             );
                             logService_.info(
                                 QStringLiteral("回零"),
-                                QStringLiteral("精确回零回中: P1=%1, P2=%2, P0=%3, 目标角度=%4°")
+                                QStringLiteral("通孔精零回通孔中点: P1=%1, P2=%2, P0=%3, 目标角度=%4°")
                                     .arg(fineHomeFirstEdgePulse_)
                                     .arg(fineHomeSecondEdgePulse_)
                                     .arg(fineHomeMidPulse_)
@@ -424,15 +640,28 @@ void MainWindow::wireSignals() {
     connect(&motionService_, &MotionService::motionError, this,
             [this](const QString& msg) { logService_.error(QStringLiteral("运动"), msg); });
     connect(&motionService_, &MotionService::positionChanged, this,
-            [this](qint64 pulse, double, double cycleDeg) {
-                lblCurrentPulse_->setText(QStringLiteral("当前位置脉冲: %1").arg(pulse));
-                lblCurrentDeg_->setText(QStringLiteral("当前角度: %1°").arg(cycleDeg, 0, 'f', 3));
+            [this](qint64 pulse, double totalDeg, double cycleDeg) {
+                // 归一化相对角度到 0-360 范围
+                double normalizedDeg = std::fmod(cycleDeg, 360.0);
+                if (normalizedDeg < 0.0) {
+                    normalizedDeg += 360.0;
+                }
+
+                // 计算绝对角度（从硬件脉冲）
+                double absDeg = totalDeg;
+
+                // 更新显示：绝对脉冲 | 相对角度
+                lblCurrentPulse_->setText(QStringLiteral("绝对: %1 脉冲").arg(pulse));
+                lblCurrentDeg_->setText(QStringLiteral("相对: %1° | 绝对: %2°")
+                    .arg(normalizedDeg, 0, 'f', 3)
+                    .arg(absDeg, 0, 'f', 3));
             });
     connect(&motionService_, &MotionService::stateChanged, this, [this](const QString& state) {
         if (state != QStringLiteral("JOGGING")) {
             jogUiDirection_ = 0;
             updateJogButtonStyle();
         }
+        updateBoardDependentUiState();
     });
     connect(&motionService_, &MotionService::motionFinished, this, [this]() {
         if (!fineHoming_ || fineHomeStage_ != FineHomeStage::MoveToMidpoint) {
@@ -440,16 +669,18 @@ void MainWindow::wireSignals() {
         }
         QString error;
         if (!boardAdapter_.zeroAxis(appConfig_.axisIndex, &error)) {
-            finishFineHoming(false, QStringLiteral("精确回零置零失败: %1").arg(error));
+            finishFineHoming(false, QStringLiteral("通孔精零置零失败: %1").arg(error), true);
             return;
         }
         motionService_.refreshPosition();
+        motionService_.setRelativeZero();
         finishFineHoming(
             true,
-            QStringLiteral("精确回零完成: P1=%1, P2=%2, P0=%3")
+            QStringLiteral("通孔精零完成: 通孔中心已归零，P1=%1, P2=%2, P0=%3")
                 .arg(fineHomeFirstEdgePulse_)
                 .arg(fineHomeSecondEdgePulse_)
-                .arg(fineHomeMidPulse_));
+                .arg(fineHomeMidPulse_),
+            true);
     });
 
     connect(&projectorService_, &ProjectorService::projectorLog, this,
@@ -463,6 +694,7 @@ void MainWindow::wireSignals() {
                     lastProjectorPort_ = portName.trimmed().toUpper();
                 } else {
                     projectorPowerOnBySoftware_ = false;
+                    projectorLedOnBySoftware_ = false;
                 }
                 updateBoardDependentUiState();
             });
@@ -489,7 +721,7 @@ void MainWindow::wireSignals() {
             applyProjectionPreviewPixmap(QPixmap(), QStringLiteral("实时投影预览"));
         }
         if (lblCurrentFrame_ != nullptr) {
-            lblCurrentFrame_->setText(QStringLiteral("当前投影: N/A"));
+            lblCurrentFrame_->setText(QStringLiteral("帧 —"));
         }
     };
     auto refreshAlignmentPreview = [this, applyProjectionPreviewPixmap]() {
@@ -499,23 +731,19 @@ void MainWindow::wireSignals() {
         }
     };
 
-    connect(&syncPlaybackService_, &SyncPlaybackService::stateChanged, this,
-            [this](const QString& state) {
-                lblSyncState_->setText(QStringLiteral("同步状态: %1").arg(state));
-            });
     connect(&syncPlaybackService_, &SyncPlaybackService::progressChanged, this,
             [this](int loopIndex, int loopTarget, double cycleDeg) {
                 const QString targetText = loopTarget <= 0 ? QStringLiteral("∞")
                                                            : QString::number(loopTarget);
                 lblSyncProgress_->setText(
-                    QStringLiteral("同步进度: %1/%2  当前角度: %3°")
+                    QStringLiteral("循环 %1/%2 · %3°")
                         .arg(loopIndex)
                         .arg(targetText)
                         .arg(cycleDeg, 0, 'f', 3));
             });
     connect(&syncPlaybackService_, &SyncPlaybackService::frameChanged, this,
             [this](int frameIndex, int loopIndex, const QString& filePath, double angleDeg) {
-                lblCurrentFrame_->setText(QStringLiteral("当前投影: 第%1张  圈次%2  角度%3°")
+                lblCurrentFrame_->setText(QStringLiteral("帧 %1 · 圈 %2 · %3°")
                                               .arg(frameIndex + 1)
                                               .arg(loopIndex + 1)
                                               .arg(angleDeg, 0, 'f', 3));
@@ -540,6 +768,8 @@ void MainWindow::wireSignals() {
         projectionWindow_.hideProjection();
         if (completed) {
             shutdownProjector(false);
+            // 投影结束后不再自动回零，直接停止即可
+            logService_.info(QStringLiteral("同步"), QStringLiteral("投影结束。"));
         }
         updateBoardDependentUiState();
     });
@@ -549,39 +779,16 @@ void MainWindow::wireSignals() {
 
     connect(&cameraService_, &CameraService::cameraLog, this,
             [this](const QString& msg) { logService_.info(QStringLiteral("相机"), msg); });
-    auto applyCameraParams = [this](bool silent) {
-        if (!cameraService_.isOpen()) {
-            return;
-        }
-        if (spinCameraBrightness_ == nullptr || spinCameraContrast_ == nullptr ||
-            spinCameraSaturation_ == nullptr || spinCameraExposure_ == nullptr) {
-            return;
-        }
-        QString error;
-        if (!cameraService_.applyImageSettings(spinCameraBrightness_->value(),
-                                               spinCameraContrast_->value(),
-                                               spinCameraSaturation_->value(),
-                                               spinCameraExposure_->value(),
-                                               cameraMonochrome_, &error) &&
-            !silent) {
-            logService_.error(QStringLiteral("相机"), error);
-        }
+    auto persistControl = [this](const QString& id, int value, bool autoMode) {
+        rememberCameraControl(id, value, autoMode);
     };
     auto updateCameraModeButton = [this]() {
-        if (btnCameraModeToggle_ == nullptr) {
+        if (comboCameraMode_ == nullptr) {
             return;
         }
-        if (cameraMonochrome_) {
-            btnCameraModeToggle_->setText(QStringLiteral("模式: 黑白"));
-            btnCameraModeToggle_->setStyleSheet(
-                QStringLiteral("QPushButton{background:#3f3f3f;color:white;border:1px solid #222;}"
-                               "QPushButton:pressed{background:#2b2b2b;}"));
-        } else {
-            btnCameraModeToggle_->setText(QStringLiteral("模式: 彩色"));
-            btnCameraModeToggle_->setStyleSheet(
-                QStringLiteral("QPushButton{background:#f0f0f0;color:#222;border:1px solid #999;}"
-                               "QPushButton:pressed{background:#e2e2e2;}"));
-        }
+        const QSignalBlocker blocker(comboCameraMode_);
+        const int index = comboCameraMode_->findData(cameraImageMode_);
+        comboCameraMode_->setCurrentIndex(index >= 0 ? index : 0);
     };
     auto updateRecordButtonStyle = [this](bool recording) {
         if (btnRec_ == nullptr) {
@@ -596,6 +803,273 @@ void MainWindow::wireSignals() {
             btnRec_->setStyleSheet(
                 QStringLiteral("QPushButton{background:#f0f0f0;color:#222;border:1px solid #999;}"
                                "QPushButton:pressed{background:#e2e2e2;}"));
+        }
+    };
+    auto rebuildCameraControls = [this, persistControl, updateCameraModeButton]() {
+        if (cameraControlLayout_ == nullptr || comboCameraResolution_ == nullptr ||
+            comboCameraMode_ == nullptr) {
+            return;
+        }
+
+        comboCameraResolution_->setParent(cameraControlContent_);
+        comboCameraMode_->setParent(cameraControlContent_);
+        while (QLayoutItem* item = cameraControlLayout_->takeAt(0)) {
+            if (QWidget* widget = item->widget()) {
+                widget->hide();
+                widget->deleteLater();
+            }
+            delete item;
+        }
+        cameraCategoryButtons_.clear();
+        extraCameraControlSpins_.clear();
+        extraCameraControlAuto_.clear();
+
+        auto addSection = [this](const QString& key, const QString& title,
+                                 bool expanded) -> QWidget* {
+            auto* header = new QToolButton(cameraControlContent_);
+            header->setText(title);
+            header->setCheckable(true);
+            header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            header->setArrowType(Qt::RightArrow);
+            header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            header->setMinimumHeight(34);
+            header->setStyleSheet(
+                QStringLiteral("QToolButton{background:#f5f7fa;border:1px solid #d9dde3;"
+                               "border-radius:4px;padding:4px 8px;text-align:left;font-weight:600;}"
+                               "QToolButton:checked{background:#eaf2ff;color:#1d5fb8;}"));
+            cameraControlLayout_->addWidget(header);
+
+            auto* body = new QWidget(cameraControlContent_);
+            body->setObjectName(QStringLiteral("cameraSection_%1").arg(key));
+            auto* bodyLayout = new QVBoxLayout(body);
+            bodyLayout->setContentsMargins(8, 6, 8, 8);
+            bodyLayout->setSpacing(8);
+            body->setVisible(false);
+            cameraControlLayout_->addWidget(body);
+            cameraCategoryButtons_.insert(key, header);
+            connect(header, &QToolButton::toggled, this,
+                    [this, key, header, body](bool open) {
+                body->setVisible(open);
+                header->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+                if (open) {
+                    for (auto it = cameraCategoryButtons_.cbegin();
+                         it != cameraCategoryButtons_.cend(); ++it) {
+                        if (it.key() != key) {
+                            it.value()->setChecked(false);
+                        }
+                    }
+                }
+            });
+            if (expanded) {
+                header->setChecked(true);
+            }
+            return body;
+        };
+
+        QWidget* formatBody = addSection(QStringLiteral("format"),
+                                         QStringLiteral("分辨率与格式"), true);
+        auto* formatRow = new QFormLayout();
+        formatRow->setContentsMargins(0, 0, 0, 0);
+        formatRow->setHorizontalSpacing(8);
+        formatRow->addRow(QStringLiteral("采集分辨率"), comboCameraResolution_);
+        qobject_cast<QVBoxLayout*>(formatBody->layout())->addLayout(formatRow);
+
+        QHash<QString, QList<CameraControlDescriptor>> groupedControls;
+        const QList<CameraControlDescriptor> controls = cameraService_.supportedControls();
+        for (const CameraControlDescriptor& descriptor : controls) {
+            if (descriptor.id == QStringLiteral("color_enable") ||
+                descriptor.id == QStringLiteral("iris") ||
+                descriptor.category == QStringLiteral("镜头")) {
+                continue;
+            }
+            QString category = descriptor.category;
+            if (descriptor.id == QStringLiteral("white_balance")) {
+                category = QStringLiteral("白平衡");
+            } else if (category == QStringLiteral("图像")) {
+                category = QStringLiteral("颜色调整");
+            }
+            if (category == QStringLiteral("曝光与增益") ||
+                category == QStringLiteral("白平衡") ||
+                category == QStringLiteral("颜色调整")) {
+                groupedControls[category].append(descriptor);
+            }
+        }
+
+        const QStringList categoryOrder = {
+            QStringLiteral("曝光与增益"), QStringLiteral("白平衡"), QStringLiteral("颜色调整")};
+        for (const QString& category : categoryOrder) {
+            const QList<CameraControlDescriptor> categoryControls = groupedControls.value(category);
+            if (categoryControls.isEmpty()) {
+                continue;
+            }
+            QWidget* body = addSection(category, category, false);
+            auto* bodyLayout = qobject_cast<QVBoxLayout*>(body->layout());
+            for (const CameraControlDescriptor& descriptor : categoryControls) {
+                auto* control = new QWidget(body);
+                auto* controlLayout = new QHBoxLayout(control);
+                controlLayout->setContentsMargins(0, 0, 0, 0);
+                controlLayout->setSpacing(4);
+                auto* label = new QLabel(descriptor.label, control);
+                label->setMinimumWidth(54);
+                label->setMaximumWidth(72);
+                label->setStyleSheet(QStringLiteral("font-size:12px;"));
+                controlLayout->addWidget(label);
+
+                auto* row = new QWidget(control);
+                auto* rowLayout = new QHBoxLayout(row);
+                rowLayout->setContentsMargins(0, 0, 0, 0);
+                rowLayout->setSpacing(2);
+                auto* spin = new QDoubleSpinBox(row);
+                spin->setObjectName(QStringLiteral("cameraControl_%1").arg(descriptor.id));
+                spin->setMinimumWidth(48);
+                spin->setStyleSheet(QStringLiteral(
+                    "QDoubleSpinBox{min-width:48px;max-width:120px;min-height:32px;padding:0 4px;}"));
+                spin->setRange(descriptor.minimum, descriptor.maximum);
+                spin->setSingleStep(qMax(1, descriptor.step));
+                spin->setDecimals(0);
+                spin->setValue(descriptor.currentValue);
+                spin->setEnabled(descriptor.supportsManual && !descriptor.autoMode);
+                auto* autoBox = new QCheckBox(QStringLiteral("自动"), row);
+                autoBox->setChecked(descriptor.autoMode);
+                autoBox->setEnabled(descriptor.supportsAuto);
+                autoBox->setVisible(descriptor.supportsAuto);
+                rowLayout->addWidget(spin, 1);
+                rowLayout->addWidget(autoBox);
+                controlLayout->addWidget(row, 1);
+                bodyLayout->addWidget(control);
+
+                extraCameraControlSpins_.insert(descriptor.id, spin);
+                extraCameraControlAuto_.insert(descriptor.id, autoBox);
+                installStepButtons(spin, QStringLiteral("camera_%1").arg(descriptor.id));
+                connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                        [this, descriptor, persistControl](double value) {
+                    const QCheckBox* automatic = extraCameraControlAuto_.value(descriptor.id, nullptr);
+                    const bool autoMode = automatic != nullptr && automatic->isChecked();
+                    QString error;
+                    if (!cameraService_.setCameraControl(descriptor.id, qRound(value), autoMode, &error)) {
+                        logService_.warn(QStringLiteral("相机"), error);
+                    } else {
+                        persistControl(descriptor.id, qRound(value), autoMode);
+                    }
+                });
+                connect(autoBox, &QCheckBox::toggled, this,
+                        [this, descriptor, spin, persistControl](bool automatic) {
+                    QString error;
+                    if (!cameraService_.setCameraControl(descriptor.id, qRound(spin->value()),
+                                                         automatic, &error)) {
+                        logService_.warn(QStringLiteral("相机"), error);
+                    } else {
+                        persistControl(descriptor.id, qRound(spin->value()), automatic);
+                    }
+                    const bool editable = !automatic && descriptor.supportsManual;
+                    spin->setEnabled(editable);
+                    setSpinStepButtonsEnabled(spin, editable);
+                });
+            }
+        }
+
+        QWidget* modeBody = addSection(QStringLiteral("mode"), QStringLiteral("色彩模式"), false);
+        auto* modeRow = new QFormLayout();
+        modeRow->setContentsMargins(0, 0, 0, 0);
+        modeRow->addRow(QStringLiteral("色彩模式"), comboCameraMode_);
+        qobject_cast<QVBoxLayout*>(modeBody->layout())->addLayout(modeRow);
+        auto* modeHint = new QLabel(QStringLiteral("色彩模式和翻转应用于预览/照片；录像为相机直出画面。"), modeBody);
+        modeHint->setWordWrap(true);
+        modeHint->setStyleSheet(QStringLiteral("color:#687385;font-size:12px;"));
+        qobject_cast<QVBoxLayout*>(modeBody->layout())->addWidget(modeHint);
+        updateCameraModeButton();
+        QWidget* flipBody = addSection(QStringLiteral("flip"), QStringLiteral("翻转"), false);
+        auto* flipRow = new QWidget(flipBody);
+        auto* flipLayout = new QHBoxLayout(flipRow);
+        flipLayout->setContentsMargins(0, 0, 0, 0);
+        chkCameraFlipHorizontal_ = new QCheckBox(QStringLiteral("水平翻转"), flipRow);
+        chkCameraFlipVertical_ = new QCheckBox(QStringLiteral("垂直翻转"), flipRow);
+        chkCameraFlipHorizontal_->setChecked(cameraFlipHorizontal_);
+        chkCameraFlipVertical_->setChecked(cameraFlipVertical_);
+        flipLayout->addWidget(chkCameraFlipHorizontal_);
+        flipLayout->addWidget(chkCameraFlipVertical_);
+        flipLayout->addStretch(1);
+        qobject_cast<QVBoxLayout*>(flipBody->layout())->addWidget(flipRow);
+        auto* flipHint = new QLabel(QStringLiteral("预览、照片和录像使用相同翻转设置。"), flipBody);
+        flipHint->setWordWrap(true);
+        flipHint->setStyleSheet(QStringLiteral("color:#687385;font-size:12px;"));
+        qobject_cast<QVBoxLayout*>(flipBody->layout())->addWidget(flipHint);
+        auto applyFlip = [this](bool horizontal, bool vertical) {
+            cameraFlipHorizontal_ = horizontal;
+            cameraFlipVertical_ = vertical;
+            cameraService_.setPreviewTransform(cameraImageMode_, horizontal, vertical);
+            cameraProfile_.insert(QStringLiteral("flip.horizontal"), horizontal);
+            cameraProfile_.insert(QStringLiteral("flip.vertical"), vertical);
+            scheduleCameraProfileSave();
+        };
+        connect(chkCameraFlipHorizontal_, &QCheckBox::toggled, this,
+                [this, applyFlip](bool checked) { applyFlip(checked, cameraFlipVertical_); });
+        connect(chkCameraFlipVertical_, &QCheckBox::toggled, this,
+                [this, applyFlip](bool checked) { applyFlip(cameraFlipHorizontal_, checked); });
+
+        if (groupedControls.isEmpty()) {
+            QWidget* infoBody = addSection(QStringLiteral("info"), QStringLiteral("相机参数"), false);
+            qobject_cast<QVBoxLayout*>(infoBody->layout())
+                ->addWidget(new QLabel(QStringLiteral("当前相机没有可调节的标准图像参数。"), infoBody));
+        }
+        cameraControlLayout_->addStretch(1);
+
+        const QSignalBlocker blocker(comboCameraResolution_);
+        comboCameraResolution_->clear();
+        const QList<CameraResolution> resolutions = cameraService_.supportedResolutions();
+        const CameraResolution current = cameraService_.currentResolution();
+        int selected = -1;
+        for (const CameraResolution& resolution : resolutions) {
+            comboCameraResolution_->addItem(resolution.description(),
+                                             QSize(resolution.width, resolution.height));
+            if (resolution.maxFps > 0.0) {
+                comboCameraResolution_->setItemData(
+                    comboCameraResolution_->count() - 1,
+                    QStringLiteral("设备支持的最高帧率：%1 FPS").arg(qRound(resolution.maxFps)),
+                    Qt::ToolTipRole);
+            }
+            if (resolution.width == current.width && resolution.height == current.height) {
+                selected = comboCameraResolution_->count() - 1;
+            }
+        }
+        if (selected >= 0) {
+            comboCameraResolution_->setCurrentIndex(selected);
+        } else if (resolutions.isEmpty()) {
+            comboCameraResolution_->addItem(QStringLiteral("相机未提供分辨率列表"));
+        }
+    };
+    auto initializeCameraControls = [this, persistControl]() {
+        const QList<CameraControlDescriptor> controls = cameraService_.supportedControls();
+        for (const CameraControlDescriptor& descriptor : controls) {
+            if (descriptor.id == QStringLiteral("color_enable") ||
+                descriptor.id == QStringLiteral("iris") ||
+                descriptor.category == QStringLiteral("镜头")) {
+                continue;
+            }
+            const QString valueKey = QStringLiteral("control.%1.value").arg(descriptor.id);
+            const QString autoKey = QStringLiteral("control.%1.auto").arg(descriptor.id);
+            const bool hasSavedValue = cameraProfile_.contains(valueKey);
+            const int value = hasSavedValue
+                                  ? qBound(descriptor.minimum, cameraProfile_.value(valueKey).toInt(),
+                                           descriptor.maximum)
+                                  : descriptor.currentValue;
+            bool autoMode = cameraProfile_.contains(autoKey)
+                                ? cameraProfile_.value(autoKey).toBool()
+                                : descriptor.autoMode;
+            if (!descriptor.supportsAuto) {
+                autoMode = false;
+            } else if (!descriptor.supportsManual) {
+                autoMode = true;
+            }
+            if (hasSavedValue || cameraProfile_.contains(autoKey)) {
+                QString error;
+                if (!cameraService_.setCameraControl(descriptor.id, value, autoMode, &error)) {
+                    logService_.warn(QStringLiteral("相机"),
+                                     QStringLiteral("恢复参数“%1”失败：%2")
+                                         .arg(descriptor.label, error));
+                }
+            }
+            persistControl(descriptor.id, value, autoMode);
         }
     };
     connect(&cameraService_, &CameraService::cameraListChanged, this,
@@ -643,7 +1117,79 @@ void MainWindow::wireSignals() {
                 }
             });
     connect(&cameraService_, &CameraService::cameraStateChanged, this,
-            [this, applyCameraParams, updateRecordButtonStyle, updateCameraModeButton](bool opened, const QString& name) {
+            [this, updateRecordButtonStyle, updateCameraModeButton, rebuildCameraControls,
+             initializeCameraControls](bool opened, const QString& name) {
+                if (opened) {
+                    cameraProfileId_ = cameraService_.currentCameraId();
+                    cameraProfile_ = configManager_.loadCameraProfile(cameraProfileId_);
+                    const int savedWidth = cameraProfile_.value(QStringLiteral("resolution.width")).toInt();
+                    const int savedHeight = cameraProfile_.value(QStringLiteral("resolution.height")).toInt();
+                    const QList<CameraResolution> supported = cameraService_.supportedResolutions();
+                    const CameraResolution openedResolution = cameraService_.currentResolution();
+                    if (!cameraProfile_.contains(QStringLiteral("defaultResolution.width")) &&
+                        openedResolution.width > 0 && openedResolution.height > 0) {
+                        cameraProfile_.insert(QStringLiteral("defaultResolution.width"), openedResolution.width);
+                        cameraProfile_.insert(QStringLiteral("defaultResolution.height"), openedResolution.height);
+                    }
+                    const int defaultWidth =
+                        cameraProfile_.value(QStringLiteral("defaultResolution.width")).toInt();
+                    const int defaultHeight =
+                        cameraProfile_.value(QStringLiteral("defaultResolution.height")).toInt();
+                    auto desiredResolution = std::find_if(
+                        supported.cbegin(), supported.cend(), [defaultWidth, defaultHeight](const auto& item) {
+                            return item.width == defaultWidth && item.height == defaultHeight;
+                        });
+                    if (savedWidth > 0 && savedHeight > 0) {
+                        desiredResolution = std::find_if(
+                            supported.cbegin(), supported.cend(), [savedWidth, savedHeight](const auto& item) {
+                                return item.width == savedWidth && item.height == savedHeight;
+                            });
+                    }
+                    if (desiredResolution == supported.cend() && !supported.isEmpty()) {
+                        const QList<QSize> preferredResolutions = {
+                            QSize(1920, 1080), QSize(1280, 800), QSize(1280, 720),
+                            QSize(1024, 768), QSize(800, 600), QSize(640, 480)};
+                        for (const QSize& preferred : preferredResolutions) {
+                            desiredResolution = std::find_if(
+                                supported.cbegin(), supported.cend(), [&preferred](const auto& item) {
+                                    return item.width == preferred.width() &&
+                                           item.height == preferred.height();
+                                });
+                            if (desiredResolution != supported.cend()) {
+                                break;
+                            }
+                        }
+                        if (desiredResolution == supported.cend()) {
+                            desiredResolution = supported.cbegin();
+                        }
+                    }
+                    if (desiredResolution != supported.cend()) {
+                        QString error;
+                        if (!cameraService_.setResolution(desiredResolution->width,
+                                                         desiredResolution->height, &error)) {
+                            logService_.warn(QStringLiteral("相机"),
+                                             QStringLiteral("恢复分辨率失败：%1").arg(error));
+                        }
+                    }
+                    const CameraResolution activeResolution = cameraService_.currentResolution();
+                    if (activeResolution.width > 0 && activeResolution.height > 0) {
+                        cameraProfile_.insert(QStringLiteral("resolution.width"), activeResolution.width);
+                        cameraProfile_.insert(QStringLiteral("resolution.height"), activeResolution.height);
+                        scheduleCameraProfileSave();
+                    }
+                    cameraImageMode_ = cameraProfile_.contains(QStringLiteral("image.mode"))
+                                           ? cameraProfile_.value(QStringLiteral("image.mode")).toInt()
+                                           : (cameraProfile_.value(QStringLiteral("monochrome"), false).toBool()
+                                                  ? 1 : 0);
+                    cameraImageMode_ = qBound(0, cameraImageMode_, 2);
+                    cameraMonochrome_ = cameraImageMode_ == 1;
+                    cameraFlipHorizontal_ = cameraProfile_.value(
+                        QStringLiteral("flip.horizontal"), false).toBool();
+                    cameraFlipVertical_ = cameraProfile_.value(
+                        QStringLiteral("flip.vertical"), false).toBool();
+                    cameraService_.setPreviewTransform(cameraImageMode_, cameraFlipHorizontal_,
+                                                       cameraFlipVertical_);
+                }
                 if (lblCameraState_ != nullptr) {
                     lblCameraState_->setText(
                         opened ? QStringLiteral("相机状态: 已打开(%1)").arg(name)
@@ -659,35 +1205,28 @@ void MainWindow::wireSignals() {
                 if (btnRec_ != nullptr) {
                     btnRec_->setEnabled(opened);
                 }
-                if (btnCameraModeToggle_ != nullptr) {
-                    btnCameraModeToggle_->setEnabled(opened);
-                }
-                if (spinCameraBrightness_ != nullptr) {
-                    spinCameraBrightness_->setEnabled(opened);
-                }
-                if (spinCameraContrast_ != nullptr) {
-                    spinCameraContrast_->setEnabled(opened);
-                }
-                if (spinCameraSaturation_ != nullptr) {
-                    spinCameraSaturation_->setEnabled(opened);
-                }
-                if (spinCameraExposure_ != nullptr) {
-                    spinCameraExposure_->setEnabled(opened);
-                }
-                if (opened) {
-                    cameraMonochrome_ = false;
+                if (btnCameraReset_ != nullptr) {
+                    btnCameraReset_->setEnabled(opened);
                 }
                 updateRecordButtonStyle(false);
-                updateCameraModeButton();
                 if (opened) {
-                    applyCameraParams(true);
+                    initializeCameraControls();
+                    rebuildCameraControls();
+                    cameraControlPanel_->setEnabled(true);
+                    updateCameraModeButton();
                 } else if (lblCameraRecordTime_ != nullptr) {
+                    cameraProfileSaveTimer_.stop();
+                    saveCameraProfile();
                     lblCameraRecordTime_->setText(QStringLiteral("录像时长: 00:00:00"));
+                    cameraControlPanel_->setEnabled(false);
                 }
             });
     connect(&cameraService_, &CameraService::recordingStateChanged, this,
             [this, updateRecordButtonStyle](bool recording, const QString& filePath) {
                 updateRecordButtonStyle(recording);
+                if (comboCameraResolution_ != nullptr) {
+                    comboCameraResolution_->setEnabled(!recording);
+                }
                 if (recording) {
                     logService_.info(QStringLiteral("相机"),
                                      QStringLiteral("录像中: %1")
@@ -741,10 +1280,18 @@ void MainWindow::wireSignals() {
                 return;
             }
             const int index = comboCameraList_->currentIndex();
-            QString error;
-            if (!cameraService_.openCamera(index, &error)) {
-                logService_.error(QStringLiteral("相机"), error);
-            }
+
+            // 异步打开相机，避免界面卡顿
+            btnCameraOpen_->setEnabled(false);
+            btnCameraOpen_->setText(QStringLiteral("打开中..."));
+
+            QTimer::singleShot(50, this, [this, index]() {
+                QString error;
+                if (!cameraService_.openCamera(index, &error)) {
+                    logService_.error(QStringLiteral("相机"), error);
+                }
+                btnCameraOpen_->setEnabled(true);
+            });
         });
     }
     if (btnSnap_ != nullptr) {
@@ -769,56 +1316,150 @@ void MainWindow::wireSignals() {
                 cameraService_.stopRecording();
                 return;
             }
+
+            // 异步启动录像，避免界面卡顿
             btnRec_->setEnabled(false);
             btnRec_->setText(QStringLiteral("启动中..."));
-            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
-            QString savedPath;
-            QString error;
-            if (!cameraService_.startRecording(&savedPath, &error)) {
-                logService_.error(QStringLiteral("相机"), error);
-                btnRec_->setEnabled(true);
-                btnRec_->setText(QStringLiteral("录像"));
-                btnRec_->setStyleSheet(
-                    QStringLiteral("QPushButton{background:#f0f0f0;color:#222;border:1px solid #999;}"
-                                   "QPushButton:pressed{background:#e2e2e2;}"));
-            } else {
-                btnRec_->setEnabled(true);
-            }
+
+            // 使用QTimer延迟执行录像启动，让界面先响应
+            QTimer::singleShot(50, this, [this]() {
+                QString savedPath;
+                QString error;
+                if (!cameraService_.startRecording(&savedPath, &error)) {
+                    logService_.error(QStringLiteral("相机"), error);
+                    btnRec_->setEnabled(true);
+                    btnRec_->setText(QStringLiteral("录像"));
+                    btnRec_->setStyleSheet(
+                        QStringLiteral("QPushButton{background:#f0f0f0;color:#222;border:1px solid #999;}"
+                                       "QPushButton:pressed{background:#e2e2e2;}"));
+                } else {
+                    btnRec_->setEnabled(true);
+                }
+            });
         });
     }
-    if (btnCameraModeToggle_ != nullptr) {
-        connect(btnCameraModeToggle_, &QPushButton::clicked, this,
-                [this, applyCameraParams, updateCameraModeButton]() {
-                    if (!cameraService_.isOpen()) {
-                        return;
+    if (btnCameraReset_ != nullptr) {
+        connect(btnCameraReset_, &QPushButton::clicked, this,
+                [this, updateCameraModeButton]() {
+            if (!cameraService_.isOpen()) {
+                return;
+            }
+            for (const CameraControlDescriptor& descriptor : cameraService_.supportedControls()) {
+                if (descriptor.id == QStringLiteral("color_enable") ||
+                    descriptor.id == QStringLiteral("iris") ||
+                    descriptor.category == QStringLiteral("镜头") ||
+                    (!descriptor.supportsManual && !descriptor.supportsAuto)) {
+                    continue;
+                }
+                const bool autoMode = !descriptor.supportsManual && descriptor.supportsAuto;
+                QString error;
+                if (!cameraService_.setCameraControl(descriptor.id, descriptor.defaultValue,
+                                                     autoMode, &error)) {
+                    logService_.warn(QStringLiteral("相机"),
+                                     QStringLiteral("重置“%1”失败：%2")
+                                         .arg(descriptor.label, error));
+                    continue;
+                }
+                QDoubleSpinBox* spin = extraCameraControlSpins_.value(descriptor.id, nullptr);
+                if (spin != nullptr) {
+                    const QSignalBlocker blocker(spin);
+                    spin->setValue(descriptor.defaultValue);
+                    const bool editable = descriptor.supportsManual && !autoMode;
+                    spin->setEnabled(editable);
+                    setSpinStepButtonsEnabled(spin, editable);
+                }
+                QCheckBox* autoBox = extraCameraControlAuto_.value(descriptor.id, nullptr);
+                if (autoBox != nullptr) {
+                    const QSignalBlocker blocker(autoBox);
+                    autoBox->setChecked(autoMode);
+                }
+                rememberCameraControl(descriptor.id, descriptor.defaultValue, autoMode);
+            }
+
+            if (comboCameraResolution_ != nullptr && comboCameraResolution_->count() > 0) {
+                const QSize defaultResolution(
+                    cameraProfile_.value(QStringLiteral("defaultResolution.width")).toInt(),
+                    cameraProfile_.value(QStringLiteral("defaultResolution.height")).toInt());
+                int defaultIndex = comboCameraResolution_->findData(defaultResolution);
+                if (defaultIndex < 0) {
+                    const QList<QSize> preferredResolutions = {
+                        QSize(1920, 1080), QSize(1280, 800), QSize(1280, 720),
+                        QSize(1024, 768), QSize(800, 600), QSize(640, 480)};
+                    for (const QSize& preferred : preferredResolutions) {
+                        defaultIndex = comboCameraResolution_->findData(preferred);
+                        if (defaultIndex >= 0) {
+                            break;
+                        }
                     }
-                    cameraMonochrome_ = !cameraMonochrome_;
-                    updateCameraModeButton();
-                    applyCameraParams(true);
-                });
+                    if (defaultIndex < 0) {
+                        defaultIndex = 0;
+                    }
+                }
+                const QSize resolution = comboCameraResolution_->itemData(defaultIndex).toSize();
+                QString error;
+                if (cameraService_.setResolution(resolution.width(), resolution.height(), &error)) {
+                    const QSignalBlocker blocker(comboCameraResolution_);
+                    comboCameraResolution_->setCurrentIndex(defaultIndex);
+                    cameraProfile_.insert(QStringLiteral("resolution.width"), resolution.width());
+                    cameraProfile_.insert(QStringLiteral("resolution.height"), resolution.height());
+                    scheduleCameraProfileSave();
+                } else {
+                    logService_.warn(QStringLiteral("相机"), error);
+                }
+            }
+            cameraMonochrome_ = false;
+            cameraImageMode_ = 0;
+            cameraFlipHorizontal_ = false;
+            cameraFlipVertical_ = false;
+            cameraService_.setPreviewTransform(0, false, false);
+            if (comboCameraMode_ != nullptr) {
+                const QSignalBlocker blocker(comboCameraMode_);
+                comboCameraMode_->setCurrentIndex(0);
+            }
+            if (chkCameraFlipHorizontal_ != nullptr) {
+                const QSignalBlocker blocker(chkCameraFlipHorizontal_);
+                chkCameraFlipHorizontal_->setChecked(false);
+            }
+            if (chkCameraFlipVertical_ != nullptr) {
+                const QSignalBlocker blocker(chkCameraFlipVertical_);
+                chkCameraFlipVertical_->setChecked(false);
+            }
+            cameraProfile_.insert(QStringLiteral("image.mode"), 0);
+            cameraProfile_.insert(QStringLiteral("monochrome"), false);
+            cameraProfile_.insert(QStringLiteral("flip.horizontal"), false);
+            cameraProfile_.insert(QStringLiteral("flip.vertical"), false);
+            scheduleCameraProfileSave();
+            updateCameraModeButton();
+        });
     }
-    auto bindAutoApplySpin = [this](QDoubleSpinBox* spin) {
-        if (spin == nullptr) {
+    connect(comboCameraMode_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+        if (index < 0 || !cameraService_.isOpen()) {
             return;
         }
-        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-                [this](double) {
-                    if (!cameraService_.isOpen()) {
-                        return;
-                    }
-                    QString error;
-                    cameraService_.applyImageSettings(
-                        spinCameraBrightness_ != nullptr ? spinCameraBrightness_->value() : 0.0,
-                        spinCameraContrast_ != nullptr ? spinCameraContrast_->value() : 0.0,
-                        spinCameraSaturation_ != nullptr ? spinCameraSaturation_->value() : 0.0,
-                        spinCameraExposure_ != nullptr ? spinCameraExposure_->value() : 0.0,
-                        cameraMonochrome_, &error);
-                });
-    };
-    bindAutoApplySpin(spinCameraBrightness_);
-    bindAutoApplySpin(spinCameraContrast_);
-    bindAutoApplySpin(spinCameraSaturation_);
-    bindAutoApplySpin(spinCameraExposure_);
+        cameraImageMode_ = comboCameraMode_->itemData(index).toInt();
+        cameraMonochrome_ = cameraImageMode_ == 1;
+        cameraService_.setPreviewTransform(cameraImageMode_, cameraFlipHorizontal_,
+                                           cameraFlipVertical_);
+        cameraProfile_.insert(QStringLiteral("image.mode"), cameraImageMode_);
+        cameraProfile_.insert(QStringLiteral("monochrome"), cameraMonochrome_);
+        scheduleCameraProfileSave();
+    });
+    connect(comboCameraResolution_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index < 0 || !cameraService_.isOpen()) {
+                    return;
+                }
+                const QSize resolution = comboCameraResolution_->itemData(index).toSize();
+                QString error;
+                if (!cameraService_.setResolution(resolution.width(), resolution.height(), &error)) {
+                    logService_.warn(QStringLiteral("相机"), error);
+                } else {
+                    cameraProfile_.insert(QStringLiteral("resolution.width"), resolution.width());
+                    cameraProfile_.insert(QStringLiteral("resolution.height"), resolution.height());
+                    scheduleCameraProfileSave();
+                }
+            });
     connect(&boardPortScanTimer_, &QTimer::timeout, this, [this]() {
         if (!boardAdapter_.isConnected()) {
             refreshBoardPorts();
@@ -839,11 +1480,11 @@ void MainWindow::wireSignals() {
             coarseHomeConfirmPulse_ = motionService_.currentPulse();
             logService_.info(
                 QStringLiteral("回零"),
-                QStringLiteral("快速回零停稳确认: 触发脉冲=%1, 停稳脉冲=%2, 差值=%3")
+                QStringLiteral("机械回零停稳确认: 触发脉冲=%1, 停稳脉冲=%2, 差值=%3")
                     .arg(coarseHomeFirstEdgePulse_)
                     .arg(coarseHomeConfirmPulse_)
                     .arg(coarseHomeConfirmPulse_ - coarseHomeFirstEdgePulse_));
-            finishCoarseHoming(true, QStringLiteral("快速回零完成: 单边沿触发即停。"));
+            finishCoarseHoming(true, QStringLiteral("机械回零完成: 单边沿触发即停。"));
             return;
         }
 
@@ -854,14 +1495,14 @@ void MainWindow::wireSignals() {
                 qRound64(appConfig_.pulsePerDeg * 360.0 * appConfig_.coarseHomeMaxTurns));
             if (traveledPulse >= maxPulse) {
                 finishCoarseHoming(false,
-                                  QStringLiteral("快速回零失败: 超过%1圈未触发。")
+                                  QStringLiteral("机械回零失败: 超过%1圈未触发。")
                                       .arg(appConfig_.coarseHomeMaxTurns, 0, 'f', 3));
                 return;
             }
         }
 
         if (coarseHomeElapsedMs_ >= appConfig_.homeTimeoutMs) {
-            finishCoarseHoming(false, QStringLiteral("快速回零失败: 超时未完成边沿定位。"));
+            finishCoarseHoming(false, QStringLiteral("机械回零失败: 超时未完成边沿定位。"));
         }
     });
     connect(&fineHomeTimer_, &QTimer::timeout, this, [this]() {
@@ -869,31 +1510,44 @@ void MainWindow::wireSignals() {
             return;
         }
         fineHomeElapsedMs_ += fineHomeTimer_.interval();
-        if (fineHomeStage_ == FineHomeStage::SeekFirstEdge ||
-            fineHomeStage_ == FineHomeStage::SeekSecondEdge) {
+        if (fineHomeStage_ == FineHomeStage::SeekHole ||
+            fineHomeStage_ == FineHomeStage::SeekFirstExit ||
+            fineHomeStage_ == FineHomeStage::SeekSecondEntry ||
+            fineHomeStage_ == FineHomeStage::SeekSecondExit) {
             const qint64 traveledPulse =
                 qAbs(motionService_.currentPulse() - fineHomeStartPulse_);
             const qint64 maxPulse = static_cast<qint64>(
                 qRound64(appConfig_.fineHomeMaxTravelDeg * appConfig_.pulsePerDeg));
             if (traveledPulse >= maxPulse) {
-                finishFineHoming(
-                    false,
-                    QStringLiteral("精确回零失败: 超过%1°未完成 DI%2 触发/释放采集。")
-                        .arg(appConfig_.fineHomeMaxTravelDeg, 0, 'f', 3)
-                        .arg(appConfig_.fineHomeDiIndex));
+                const QString detail =
+                    fineHomeStage_ == FineHomeStage::SeekHole
+                        ? QStringLiteral("未检测到通孔对射 DI%1 触发。").arg(appConfig_.fineHomeDiIndex)
+                        : (fineHomeStage_ == FineHomeStage::SeekFirstExit
+                               ? QStringLiteral("已找到通孔，但未检测到第一侧边缘。")
+                               : (fineHomeStage_ == FineHomeStage::SeekSecondEntry
+                                      ? QStringLiteral("反向后未重新进入通孔。")
+                                      : QStringLiteral("反向后未检测到第二侧边缘。")));
+                finishFineHoming(false,
+                                 QStringLiteral("通孔精零失败: 超过%1°，%2")
+                                     .arg(appConfig_.fineHomeMaxTravelDeg, 0, 'f', 3)
+                                     .arg(detail),
+                                 true);
                 return;
             }
         }
 
-        if (fineHomeElapsedMs_ >= appConfig_.fineHomeTimeoutMs) {
+        if (appConfig_.fineHomeTimeoutMs > 0 && fineHomeElapsedMs_ >= appConfig_.fineHomeTimeoutMs) {
             const QString detail =
-                fineHomeStage_ == FineHomeStage::SeekFirstEdge
-                    ? QStringLiteral("未检测到 DI%1 触发。").arg(appConfig_.fineHomeDiIndex)
-                    : (fineHomeStage_ == FineHomeStage::SeekSecondEdge
-                           ? QStringLiteral("已检测到 DI%1 触发，但未检测到 DI%1 释放。")
-                                 .arg(appConfig_.fineHomeDiIndex)
-                           : QStringLiteral("回中定位超时。"));
-            finishFineHoming(false, QStringLiteral("精确回零失败: %1").arg(detail));
+                fineHomeStage_ == FineHomeStage::SeekHole
+                    ? QStringLiteral("未检测到通孔对射 DI%1 触发。").arg(appConfig_.fineHomeDiIndex)
+                    : (fineHomeStage_ == FineHomeStage::SeekFirstExit
+                           ? QStringLiteral("已找到通孔，但未检测到第一侧边缘。")
+                           : (fineHomeStage_ == FineHomeStage::SeekSecondEntry
+                                  ? QStringLiteral("反向后未重新进入通孔。")
+                                  : (fineHomeStage_ == FineHomeStage::SeekSecondExit
+                                         ? QStringLiteral("反向后未检测到第二侧边缘。")
+                                         : QStringLiteral("回中定位超时。"))));
+            finishFineHoming(false, QStringLiteral("通孔精零失败: %1").arg(detail), true);
         }
     });
     boardPortScanTimer_.start();
@@ -968,7 +1622,7 @@ void MainWindow::wireSignals() {
         jogUiDirection_ = 0;
         updateJogButtonStyle();
         if (coarseHoming_) {
-            finishCoarseHoming(false, QStringLiteral("快速回零已手动停止。"));
+            finishCoarseHoming(false, QStringLiteral("机械回零已手动停止。"));
         }
     });
     connect(btnEStop, &QPushButton::clicked, this, [this]() {
@@ -976,53 +1630,122 @@ void MainWindow::wireSignals() {
         jogUiDirection_ = 0;
         updateJogButtonStyle();
         if (coarseHoming_) {
-            finishCoarseHoming(false, QStringLiteral("快速回零已急停中断。"));
+            finishCoarseHoming(false, QStringLiteral("机械回零已急停中断。"));
         }
     });
 
     connect(btnMoveAbs, &QPushButton::clicked, this, [this]() {
         if (!boardAdapter_.isConnected()) {
-            logService_.warn(QStringLiteral("运动"), QStringLiteral("板卡未连接，无法运动。"));
+            logService_.warn(QStringLiteral("运动"), QStringLiteral("板卡未连接，无法归零。"));
             return;
         }
         if (safetyTripped_) {
-            logService_.warn(QStringLiteral("安全"), QStringLiteral("当前处于 ALARM，禁止运动。"));
+            logService_.warn(QStringLiteral("安全"), QStringLiteral("当前处于 ALARM，禁止归零。"));
             return;
         }
-        motionService_.moveToAbsDeg(editTargetAbsDeg_ != nullptr ? editTargetAbsDeg_->value() : 0.0);
+        if (syncPlaybackService_.isRunning() || coarseHoming_ || fineHoming_ ||
+            motionService_.stateText() != QStringLiteral("READY")) {
+            logService_.warn(QStringLiteral("运动"), QStringLiteral("当前状态不允许相对角度归零。"));
+            return;
+        }
+        motionService_.setRelativeZero();
     });
 
     connect(btnMoveRel, &QPushButton::clicked, this, [this]() {
         if (!boardAdapter_.isConnected()) {
-            logService_.warn(QStringLiteral("运动"), QStringLiteral("板卡未连接，无法运动。"));
+            logService_.warn(QStringLiteral("运动"), QStringLiteral("板卡未连接，无法回零。"));
             return;
         }
         if (safetyTripped_) {
-            logService_.warn(QStringLiteral("安全"), QStringLiteral("当前处于 ALARM，禁止运动。"));
+            logService_.warn(QStringLiteral("安全"), QStringLiteral("当前处于 ALARM，禁止回零。"));
             return;
         }
-        motionService_.moveByRelDeg(editTargetRelDeg_ != nullptr ? editTargetRelDeg_->value() : 0.0);
+        if (syncPlaybackService_.isRunning() || coarseHoming_ || fineHoming_ ||
+            motionService_.stateText() != QStringLiteral("READY")) {
+            logService_.warn(QStringLiteral("运动"), QStringLiteral("当前状态不允许回到相对零点。"));
+            return;
+        }
+        motionService_.moveToRelativeZeroShortest();
     });
 
-    connect(btnCoarseCheck_, &QPushButton::clicked, this, [this]() {
-        startCoarseHoming();
-    });
+    // 寸动+ 按钮
+    if (btnStepPlusMotion_ != nullptr) {
+        connect(btnStepPlusMotion_, &QPushButton::clicked, this, [this]() {
+            if (!boardAdapter_.isConnected()) {
+                logService_.warn(QStringLiteral("运动"), QStringLiteral("板卡未连接"));
+                return;
+            }
+            if (safetyTripped_) {
+                logService_.warn(QStringLiteral("安全"), QStringLiteral("处于 ALARM"));
+                return;
+            }
+            if (syncPlaybackService_.isRunning() || coarseHoming_ || fineHoming_ ||
+                motionService_.stateText() != QStringLiteral("READY")) {
+                logService_.warn(QStringLiteral("运动"), QStringLiteral("状态不允许寸动"));
+                return;
+            }
+            if (editJogStepDeg_ == nullptr) {
+                return;
+            }
+            const double stepDeg = editJogStepDeg_->value();
+            if (qAbs(stepDeg) < 0.001) {
+                logService_.warn(QStringLiteral("运动"), QStringLiteral("寸动角度过小"));
+                return;
+            }
+            motionService_.moveByRelDeg(stepDeg);
+        });
+    }
+    if (btnStepMinusMotion_ != nullptr) {
+        connect(btnStepMinusMotion_, &QPushButton::clicked, this, [this]() {
+            if (!boardAdapter_.isConnected()) {
+                logService_.warn(QStringLiteral("运动"), QStringLiteral("板卡未连接"));
+                return;
+            }
+            if (safetyTripped_) {
+                logService_.warn(QStringLiteral("安全"), QStringLiteral("处于 ALARM"));
+                return;
+            }
+            if (syncPlaybackService_.isRunning() || coarseHoming_ || fineHoming_ ||
+                motionService_.stateText() != QStringLiteral("READY")) {
+                logService_.warn(QStringLiteral("运动"), QStringLiteral("状态不允许寸动"));
+                return;
+            }
+            if (editJogStepDeg_ == nullptr) {
+                return;
+            }
+            const double stepDeg = editJogStepDeg_->value();
+            if (qAbs(stepDeg) < 0.001) {
+                logService_.warn(QStringLiteral("运动"), QStringLiteral("寸动角度过小"));
+                return;
+            }
+            motionService_.moveByRelDeg(-stepDeg);
+        });
+    }
+
+    // 机械回零按钮连接
+    if (btnCoarseMechanicalHome_ != nullptr) {
+        connect(btnCoarseMechanicalHome_, &QPushButton::clicked, this, [this]() {
+            startCoarseHoming();
+        });
+    }
+
     connect(btnFineHome_, &QPushButton::clicked, this, [this]() {
         startFineHoming();
     });
 
-    connect(btnConfirmZReady_, &QPushButton::clicked, this, [this]() {
-        if (!laserStableForZConfirm()) {
-            logService_.warn(QStringLiteral("Z确认"),
-                             QStringLiteral("当前对射状态未稳定，无法确认Z到位。"));
-            return;
-        }
-        const QString now = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
-        lblZConfirmTime_->setText(QStringLiteral("Z确认时间: %1").arg(now));
-        logService_.info(
-            QStringLiteral("Z确认"),
-            QStringLiteral("操作员确认Z到位，对射状态稳定时间达到 %1 ms。").arg(appConfig_.laserStableMs));
-    });
+    // 确认Z到位功能已禁用
+    // connect(btnConfirmZReady_, &QPushButton::clicked, this, [this]() {
+    //     if (!laserStableForZConfirm()) {
+    //         logService_.warn(QStringLiteral("Z确认"),
+    //                          QStringLiteral("当前对射状态未稳定，无法确认Z到位。"));
+    //         return;
+    //     }
+    //     const QString now = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    //     lblZConfirmTime_->setText(QStringLiteral("Z确认时间: %1").arg(now));
+    //     logService_.info(
+    //         QStringLiteral("Z确认"),
+    //         QStringLiteral("操作员确认Z到位，对射状态稳定时间达到 %1 ms。").arg(appConfig_.laserStableMs));
+    // });
 
     connect(btnProjectorRefresh_, &QPushButton::clicked, this, [this]() {
         refreshProjectorPorts();
@@ -1034,6 +1757,8 @@ void MainWindow::wireSignals() {
     });
     connect(btnProjectorClose_, &QPushButton::clicked, this, [this]() {
         projectorService_.closePort();
+        projectorPowerOnBySoftware_ = false;
+        projectorLedOnBySoftware_ = false;
     });
     connect(btnProjectorPowerOn_, &QPushButton::clicked, this, [this]() {
         if (!projectorService_.isPortOpen() && !autoConnectProjector()) {
@@ -1058,6 +1783,7 @@ void MainWindow::wireSignals() {
             return;
         }
         projectorPowerOnBySoftware_ = true;
+        projectorLedOnBySoftware_ = false;  // LED默认关闭
         logService_.info(QStringLiteral("光机"), QStringLiteral("光机已开启，LED已默认关闭。"));
         updateBoardDependentUiState();
     });
@@ -1071,22 +1797,29 @@ void MainWindow::wireSignals() {
             logService_.error(QStringLiteral("光机"), error);
         }
         projectorPowerOnBySoftware_ = false;
+        projectorLedOnBySoftware_ = false;
         updateBoardDependentUiState();
     });
     connect(btnLedOn_, &QPushButton::clicked, this, [this]() {
         if (!projectorPowerOnBySoftware_) {
-            logService_.warn(QStringLiteral("光机"), QStringLiteral("请先点击“光机开”后再开启LED。"));
+            logService_.warn(QStringLiteral("Projector"), QStringLiteral("Please click 'Power ON' first."));
             return;
         }
         QString error;
         if (!projectorService_.setLed(true, &error)) {
-            logService_.error(QStringLiteral("光机"), error);
+            logService_.error(QStringLiteral("Projector"), error);
+        } else {
+            projectorLedOnBySoftware_ = true;
+            updateBoardDependentUiState();
         }
     });
     connect(btnLedOff_, &QPushButton::clicked, this, [this]() {
         QString error;
         if (!projectorService_.setLed(false, &error)) {
-            logService_.error(QStringLiteral("光机"), error);
+            logService_.error(QStringLiteral("Projector"), error);
+        } else {
+            projectorLedOnBySoftware_ = false;
+            updateBoardDependentUiState();
         }
     });
     connect(btnApplyLedPercent_, &QPushButton::clicked, this, [this]() {
@@ -1109,10 +1842,16 @@ void MainWindow::wireSignals() {
     });
 
     connect(btnBrowseImageFolder_, &QPushButton::clicked, this, [this]() {
+        const QString initialDir = editImageFolder_->text().trimmed().isEmpty()
+                                       ? appConfig_.lastImageFolderPath
+                                       : editImageFolder_->text();
         const QString folder = QFileDialog::getExistingDirectory(
-            this, QStringLiteral("选择图片文件夹"), editImageFolder_->text());
+            this, QStringLiteral("选择图片文件夹"), initialDir);
         if (!folder.isEmpty()) {
             editImageFolder_->setText(folder);
+            // 保存路径到配置
+            appConfig_.lastImageFolderPath = folder;
+            configManager_.save(appConfig_, nullptr);
             runImageFolderCheck();
         }
     });
@@ -1157,28 +1896,39 @@ void MainWindow::wireSignals() {
             (editImageFolder_ != nullptr && !editImageFolder_->text().trimmed().isEmpty())
                 ? QDir::toNativeSeparators(editImageFolder_->text().trimmed())
                 : QStringLiteral("未设置");
-        const QString roundTimeText = QStringLiteral("%1 s").arg(roundSec, 0, 'f', 3);
+        const QString roundTimeText = QStringLiteral("%1 s").arg(roundSec, 0, 'f', 1);
 
         if (!projectorPowerOnBySoftware_ || !projectorService_.isPortOpen()) {
-            logService_.warn(QStringLiteral("同步"), QStringLiteral("请先点击“光机开”，确认光机开启且LED关闭后再启动同步。"));
+            logService_.warn(QStringLiteral("Sync"), QStringLiteral("Please turn on projector first."));
+            updateBoardDependentUiState();
+            return;
+        }
+
+        // Check projector state: only allow projection when "Power ON + LED OFF"
+        if (projectorLedOnBySoftware_) {
+            logService_.warn(QStringLiteral("Sync"),
+                QStringLiteral("LED must be OFF before starting projection. Please turn LED OFF first."));
+            QMessageBox::warning(this,
+                QStringLiteral("Projector State Check"),
+                QStringLiteral("LED must be OFF before starting projection.\n\nPlease turn LED OFF first, then start projection."));
             return;
         }
 
         const auto confirm = QMessageBox::question(
             this,
-            QStringLiteral("开始同步确认"),
-            QStringLiteral("请确认以下信息：\n\n"
-                           "亮度: %1%%\n"
-                           "循环: %2\n"
-                           "一圈时间: %3\n"
-                           "投影序列文件夹: %4\n\n"
-                           "是否已确认零点以及 Z 到位？\n"
-                           "确认后会先黑屏开启LED %5 帧，再启动旋转同步。")
+            QStringLiteral("开始投影确认"),
+            QStringLiteral("请确认以下参数：\n\n"
+                           "亮度：%1%%\n"
+                           "循环：%2\n"
+                           "一圈时间：%3\n"
+                           "图片目录：%4\n\n"
+                           "请确认零点和 Z 位置。\n"
+                           "确认后会预载首帧并开启 LED，等待光机稳定 %5 秒后开始旋转同步。")
                 .arg(brightnessPercent)
                 .arg(loopText)
                 .arg(roundTimeText)
                 .arg(folderText)
-                .arg(kPreSyncBlackFrames),
+                .arg(kProjectorLedSettleMs / 1000.0, 0, 'f', 1),
             QMessageBox::Ok | QMessageBox::Cancel,
             QMessageBox::Cancel);
         if (confirm != QMessageBox::Ok) {
@@ -1187,44 +1937,55 @@ void MainWindow::wireSignals() {
 
         btnSyncStart_->setEnabled(false);
         btnSyncStop_->setEnabled(false);
+        syncPlaybackService_.setFrames(checkedFrames_);
+        if (checkedFrames_.isEmpty() || !projectionWindow_.displayImage(checkedFrames_.first().filePath)) {
+            const QString message = QStringLiteral("无法加载投影序列首帧，请重新检查图片序列。\n%1")
+                                        .arg(checkedFrames_.isEmpty()
+                                                 ? QStringLiteral("当前没有可用图片帧。")
+                                                 : checkedFrames_.first().filePath);
+            logService_.error(QStringLiteral("同步"), message);
+            QMessageBox::critical(this, QStringLiteral("开始投影失败"), message);
+            updateBoardDependentUiState();
+            return;
+        }
         projectionWindow_.showForProjection();
-        projectionWindow_.showBlackFrame();
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+        if (lblCurrentFrame_ != nullptr) {
+            lblCurrentFrame_->setText(QStringLiteral("首帧已就绪"));
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
 
         auto abortSyncPrepare = [this](const QString& message) {
             QString ledError;
             projectorService_.setLed(false, &ledError);
             projectionWindow_.hideProjection();
             logService_.error(QStringLiteral("同步"), message);
+            QMessageBox::critical(this, QStringLiteral("开始投影失败"), message);
             updateBoardDependentUiState();
+        };
+        auto waitDuringStart = [](int waitMs) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            QEventLoop waitLoop;
+            QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec(QEventLoop::AllEvents);
         };
 
         QString error;
-        error.clear();
         if (!projectorService_.setBrightnessPercent(brightnessPercent, &error)) {
-            abortSyncPrepare(QStringLiteral("启动同步前设置亮度失败: %1").arg(error));
+            abortSyncPrepare(QStringLiteral("启动投影前设置亮度失败: %1").arg(error));
             return;
         }
+        waitDuringStart(kProjectorCommandGapMs);
+
         error.clear();
         if (!projectorService_.setLed(true, &error)) {
-            abortSyncPrepare(QStringLiteral("启动同步前打开LED失败: %1").arg(error));
+            abortSyncPrepare(QStringLiteral("启动投影前打开LED失败: %1").arg(error));
             return;
         }
-
-        const int frameIntervalMs =
-            qMax(kMinBlackFrameMs,
-                 static_cast<int>(qRound(1000.0 * roundSec /
-                                         static_cast<double>(qMax(1, checkedFrames_.size())))));
-        const int blackDurationMs = frameIntervalMs * kPreSyncBlackFrames;
         logService_.info(QStringLiteral("同步"),
-                         QStringLiteral("LED已开启，黑屏预投影 %1 帧，等待 %2 ms 后启动旋转同步。")
-                             .arg(kPreSyncBlackFrames)
-                             .arg(blackDurationMs));
-        QEventLoop blackFrameLoop;
-        QTimer::singleShot(blackDurationMs, &blackFrameLoop, &QEventLoop::quit);
-        blackFrameLoop.exec(QEventLoop::ExcludeUserInputEvents);
+                         QStringLiteral("首帧已预载，LED 开启后稳定 %1 ms 即启动旋转同步。")
+                             .arg(kProjectorLedSettleMs));
+        waitDuringStart(kProjectorLedSettleMs);
 
-        syncPlaybackService_.setFrames(checkedFrames_);
         if (!syncPlaybackService_.start(roundSec, spinLoopCount_->value(),
                                         chkInfiniteLoop_->isChecked(), &error)) {
             abortSyncPrepare(error);
@@ -1271,11 +2032,11 @@ void MainWindow::wireSignals() {
             return;
         }
         if (coarseHoming_) {
-            finishCoarseHoming(false, QStringLiteral("快速回零已通过 Esc 停止。"));
+            finishCoarseHoming(false, QStringLiteral("机械回零已通过 Esc 停止。"));
             return;
         }
         if (fineHoming_) {
-            finishFineHoming(false, QStringLiteral("精确回零已通过 Esc 停止。"));
+            finishFineHoming(false, QStringLiteral("通孔精零已通过 Esc 停止。"));
             return;
         }
         if (motionService_.stateText() != QStringLiteral("READY")) {
@@ -1304,18 +2065,15 @@ void MainWindow::wireSignals() {
 
     cameraService_.refreshCameras();
 
+    // Delayed auto-connect attempt after UI is ready
     QTimer::singleShot(300, this, [this]() {
         refreshBoardPorts();
         refreshProjectorPorts();
-
-        if (!boardAdapter_.isConnected() && !autoConnectBoard()) {
-            logService_.info(QStringLiteral("板卡"),
-                             QStringLiteral("启动自动连接未成功，可手动点击“连接板卡”重试。"));
+        if (!boardAdapter_.isConnected()) {
+            autoConnectBoard();
         }
-
-        if (!projectorService_.isPortOpen() && !autoConnectProjector()) {
-            logService_.info(QStringLiteral("光机"),
-                             QStringLiteral("启动自动连接未成功，可手动点击“连接光机”重试。"));
+        if (!projectorService_.isPortOpen()) {
+            autoConnectProjector();
         }
     });
 }
@@ -1498,20 +2256,13 @@ void MainWindow::refreshBoardPorts() {
 }
 
 bool MainWindow::runImageFolderCheck() {
-    auto setImageCheckBadge = [this](const QString& text, bool ok) {
-        lblImageCheckResult_->setText(text);
-        lblImageCheckResult_->setStyleSheet(
-            ok
-                ? QStringLiteral("QLabel{background:#ecfdf3;border:1px solid #a6f4c5;color:#067647;border-radius:6px;padding:4px 8px;font-weight:600;}")
-                : QStringLiteral("QLabel{background:#fef3f2;border:1px solid #f5c2c7;color:#b42318;border-radius:6px;padding:4px 8px;font-weight:600;}"));
-    };
-
     const QString folderPath = editImageFolder_->text().trimmed();
     if (folderPath.isEmpty()) {
         checkedFrames_.clear();
-        setImageCheckBadge(QStringLiteral("序列状态: 未检查"), false);
+        lblImageCheckResult_->setText(QStringLiteral("sequence not checked"));
+        lblImageCheckResult_->setStyleSheet(QString());
         if (lblProjectionPreview_ != nullptr) {
-            lblProjectionPreview_->setText(QStringLiteral("实时投影预览"));
+            lblProjectionPreview_->setText(QStringLiteral("image preview"));
             lblProjectionPreview_->setPixmap(QPixmap());
         }
         return false;
@@ -1519,9 +2270,11 @@ bool MainWindow::runImageFolderCheck() {
 
     const SequenceCheckResult result = imageSequenceService_.checkFolder(folderPath);
     if (result.ok) {
-        setImageCheckBadge(result.message, true);
+        lblImageCheckResult_->setText(result.message);
+        lblImageCheckResult_->setStyleSheet(
+            QStringLiteral("QLabel{background:#ecfdf3;border:1px solid #a6f4c5;color:#067647;border-radius:6px;padding:4px 8px;font-weight:600;}"));
         checkedFrames_ = result.frames;
-        logService_.info(QStringLiteral("序列"), result.message);
+        logService_.info(QStringLiteral("sequence"), result.message);
         if (!checkedFrames_.isEmpty() && lblProjectionPreview_ != nullptr) {
             QPixmap px(checkedFrames_.first().filePath);
             if (!px.isNull()) {
@@ -1530,17 +2283,19 @@ bool MainWindow::runImageFolderCheck() {
                     px.scaled(lblProjectionPreview_->size(), Qt::KeepAspectRatio,
                               Qt::SmoothTransformation));
             } else {
-                lblProjectionPreview_->setText(QStringLiteral("实时投影预览"));
+                lblProjectionPreview_->setText(QStringLiteral("image preview"));
             }
         }
     } else {
-        setImageCheckBadge(QStringLiteral("序列异常: %1").arg(result.message), false);
+        lblImageCheckResult_->setText(QStringLiteral("sequence error: %1").arg(result.message));
+        lblImageCheckResult_->setStyleSheet(
+            QStringLiteral("QLabel{background:#fef3f2;border:1px solid #f5c2c7;color:#b42318;border-radius:6px;padding:4px 8px;font-weight:600;}"));
         checkedFrames_.clear();
         if (lblProjectionPreview_ != nullptr) {
-            lblProjectionPreview_->setText(QStringLiteral("实时投影预览"));
+            lblProjectionPreview_->setText(QStringLiteral("image preview"));
             lblProjectionPreview_->setPixmap(QPixmap());
         }
-        logService_.warn(QStringLiteral("序列"), result.message);
+        logService_.warn(QStringLiteral("sequence"), result.message);
     }
     return result.ok;
 }
@@ -1551,19 +2306,19 @@ bool MainWindow::startCoarseHoming() {
         return false;
     }
     if (syncPlaybackService_.isRunning()) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("同步运行中，禁止执行快速回零。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("同步运行中，禁止执行机械回零。"));
         return false;
     }
     if (coarseHoming_) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("快速回零流程已在运行。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("机械回零流程已在运行。"));
         return false;
     }
     if (fineHoming_) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("精确回零流程已在运行。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("通孔精零流程已在运行。"));
         return false;
     }
     if (!boardAdapter_.isConnected()) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("请先连接板卡后再执行快速回零。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("请先连接板卡后再执行机械回零。"));
         return false;
     }
     const bool initialDi = boardAdapter_.diBit(appConfig_.coarseHomeDiIndex);
@@ -1575,8 +2330,7 @@ bool MainWindow::startCoarseHoming() {
     boardAdapter_.setPollIntervalMs(5);
     coarseHomeTimer_.setInterval(5);
     if (!motionService_.jogStart(appConfig_.coarseHomeDirection, coarseHomeJogSpeedPulseMs_)) {
-        lblHomeResult_->setText(QStringLiteral("回零结果: 快速回零启动失败。"));
-        logService_.error(QStringLiteral("回零"), QStringLiteral("快速回零启动失败: 无法进入点动。"));
+        logService_.error(QStringLiteral("回零"), QStringLiteral("机械回零启动失败: 无法进入点动。"));
         return false;
     }
 
@@ -1593,19 +2347,17 @@ bool MainWindow::startCoarseHoming() {
     btnCoarseCheck_->setEnabled(false);
     btnFineHome_->setEnabled(false);
     updateBoardDependentUiState();
-    lblHomeResult_->setText(QStringLiteral("回零结果: 快速回零进行中..."));
-    lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
     const qint64 maxPulse = static_cast<qint64>(
         qRound64(appConfig_.pulsePerDeg * 360.0 * appConfig_.coarseHomeMaxTurns));
     logService_.info(QStringLiteral("回零"),
-                     QStringLiteral("快速回零开始: 单边沿触发法，DI%1，方向%2，速度%3 °/s，初始DI=%4。")
+                     QStringLiteral("机械回零开始: 单边沿触发法，DI%1，方向%2，速度%3 °/s，初始DI=%4。")
                          .arg(appConfig_.coarseHomeDiIndex)
                          .arg(appConfig_.coarseHomeDirection > 0 ? QStringLiteral("+") : QStringLiteral("-"))
                          .arg(coarseHomeJogSpeedPulseMs_ * 1000.0 / appConfig_.pulsePerDeg, 0, 'f', 3)
                          .arg(coarseHomeInitialDi_ ? QStringLiteral("ON") : QStringLiteral("OFF")));
     logService_.info(
         QStringLiteral("回零"),
-        QStringLiteral("快速回零限制: 最大%1圈，最大脉冲=%2，DI轮询间隔=5ms。")
+        QStringLiteral("机械回零限制: 最大%1圈，最大脉冲=%2，DI轮询间隔=5ms。")
             .arg(appConfig_.coarseHomeMaxTurns, 0, 'f', 3)
             .arg(maxPulse));
     return true;
@@ -1613,36 +2365,33 @@ bool MainWindow::startCoarseHoming() {
 
 bool MainWindow::startFineHoming() {
     if (safetyTripped_) {
-        logService_.warn(QStringLiteral("安全"), QStringLiteral("当前处于 ALARM，禁止精确回零。"));
+        logService_.warn(QStringLiteral("安全"), QStringLiteral("当前处于 ALARM，禁止通孔精零。"));
         return false;
     }
     if (syncPlaybackService_.isRunning()) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("同步运行中，禁止执行精确回零。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("同步运行中，禁止执行通孔精零。"));
         return false;
     }
     if (coarseHoming_) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("快速回零流程进行中，无法启动精确回零。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("机械回零流程进行中，无法启动通孔精零。"));
         return false;
     }
     if (fineHoming_) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("精确回零流程已在运行。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("通孔精零流程已在运行。"));
         return false;
     }
     if (!boardAdapter_.isConnected()) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("请先连接板卡后再执行精确回零。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("请先连接板卡后再执行通孔精零。"));
         return false;
     }
     if (motionService_.stateText() != QStringLiteral("READY")) {
-        logService_.warn(QStringLiteral("回零"), QStringLiteral("当前运动未停止，无法执行精确回零。"));
+        logService_.warn(QStringLiteral("回零"), QStringLiteral("当前运动未停止，无法执行通孔精零。"));
         return false;
     }
 
-    double jogSpeedPulseMs = 0.0;
-    if (!resolveJogSpeed(jogSpeedPulseMs)) {
-        return false;
-    }
-
-    fineHomeJogSpeedPulseMs_ = qMax(0.001, jogSpeedPulseMs * kFineHomeJogSpeedScale);
+    fineHomeJogSpeedPulseMs_ =
+        qMax(0.001, appConfig_.fineHomeSpeedDegPerSec * appConfig_.pulsePerDeg / 1000.0);
+    fineHomeScanDirection_ = appConfig_.fineHomeDirection > 0 ? 1 : -1;
     motionService_.refreshPosition();
     fineHomeStartPulse_ = motionService_.currentPulse();
     fineHomeLastSwitchState_ = fineHomeSwitchTriggeredFromRaw(boardAdapter_.diRaw());
@@ -1650,49 +2399,48 @@ bool MainWindow::startFineHoming() {
     fineHomeSecondEdgePulse_ = 0;
     fineHomeMidPulse_ = 0;
     fineHomeElapsedMs_ = 0;
-    fineHomeStage_ = fineHomeLastSwitchState_ ? FineHomeStage::SeekSecondEdge
-                                             : FineHomeStage::SeekFirstEdge;
-    if (fineHomeLastSwitchState_) {
-        fineHomeFirstEdgePulse_ = fineHomeStartPulse_;
-    }
+    fineHomeStage_ = fineHomeLastSwitchState_ ? FineHomeStage::SeekFirstExit
+                                             : FineHomeStage::SeekHole;
 
-    boardAdapter_.setPollIntervalMs(5);
-    fineHomeTimer_.setInterval(5);
-    if (!motionService_.jogStart(+1, fineHomeJogSpeedPulseMs_)) {
-        lblHomeResult_->setText(QStringLiteral("回零结果: 精确回零启动失败。"));
-        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
-        logService_.error(QStringLiteral("回零"), QStringLiteral("精确回零启动失败: 无法进入点动。"));
+    boardAdapter_.setPollIntervalMs(appConfig_.fineHomePollIntervalMs);
+    fineHomeTimer_.setInterval(appConfig_.fineHomePollIntervalMs);
+    if (!motionService_.jogStart(fineHomeScanDirection_, fineHomeJogSpeedPulseMs_)) {
+        logService_.error(QStringLiteral("回零"), QStringLiteral("通孔精零启动失败: 无法进入点动。"));
         boardAdapter_.setPollIntervalMs(200);
         return false;
     }
 
     fineHoming_ = true;
     fineHomeTimer_.start();
-    lblHomeResult_->setText(QStringLiteral("回零结果: 精确回零进行中..."));
-    lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
     updateBoardDependentUiState();
 
     logService_.info(
         QStringLiteral("回零"),
-        QStringLiteral("精确回零开始: DI%1, active_low=%2, 正向扫描, 速度=%3 °/s, 初始状态=%4。")
+        QStringLiteral("通孔精零开始: 通孔对射DI%1, active_low=%2, 扫描方向=%3, 速度=%4 °/s, 初始状态=%5。")
             .arg(appConfig_.fineHomeDiIndex)
             .arg(appConfig_.fineHomeActiveLow ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(fineHomeScanDirection_ > 0 ? QStringLiteral("+") : QStringLiteral("-"))
             .arg(fineHomeJogSpeedPulseMs_ * 1000.0 / appConfig_.pulsePerDeg, 0, 'f', 3)
             .arg(fineHomeLastSwitchState_ ? QStringLiteral("TRIGGERED") : QStringLiteral("CLEAR")));
     if (fineHomeLastSwitchState_) {
         logService_.warn(
             QStringLiteral("回零"),
-            QStringLiteral("精确回零启动时 DI%1 已触发: 当前脉冲=%2 作为 P1，继续正向寻找释放边沿。")
-                .arg(appConfig_.fineHomeDiIndex)
-                .arg(fineHomeFirstEdgePulse_));
+            QStringLiteral("通孔精零启动时通孔对射 DI%1 已触发: 当前已在通孔内，继续寻找第一侧边缘。")
+                .arg(appConfig_.fineHomeDiIndex));
     }
     logService_.info(
         QStringLiteral("回零"),
-        QStringLiteral("精确回零限制: 速度为当前点动的%1%%, 最大行程=%2°, 最大脉冲=%3, 超时=%4ms。")
-            .arg(static_cast<int>(kFineHomeJogSpeedScale * 100))
+        QStringLiteral("通孔精零限制: 独立低速=%1 °/s，DI轮询=%2 ms，理论采样步进=%3°，单段最大行程=%4°，最大脉冲=%5，超时=%6。")
+            .arg(appConfig_.fineHomeSpeedDegPerSec, 0, 'f', 3)
+            .arg(appConfig_.fineHomePollIntervalMs)
+            .arg(appConfig_.fineHomeSpeedDegPerSec *
+                     static_cast<double>(appConfig_.fineHomePollIntervalMs) / 1000.0,
+                 0, 'f', 6)
             .arg(appConfig_.fineHomeMaxTravelDeg, 0, 'f', 3)
             .arg(static_cast<qint64>(qRound64(appConfig_.fineHomeMaxTravelDeg * appConfig_.pulsePerDeg)))
-            .arg(appConfig_.fineHomeTimeoutMs));
+            .arg(appConfig_.fineHomeTimeoutMs > 0
+                     ? QStringLiteral("%1ms").arg(appConfig_.fineHomeTimeoutMs)
+                     : QStringLiteral("关闭")));
     return true;
 }
 
@@ -1710,6 +2458,9 @@ void MainWindow::finishCoarseHoming(bool success, const QString& message) {
     coarseHomeStage_ = CoarseHomeStage::Idle;
     coarseHomeConfirmPulse_ = 0;
     btnCoarseCheck_->setEnabled(true);
+    if (btnCoarseMechanicalHome_ != nullptr) {
+        btnCoarseMechanicalHome_->setEnabled(true);
+    }
     btnFineHome_->setEnabled(true);
 
     bool finalSuccess = success;
@@ -1721,12 +2472,11 @@ void MainWindow::finishCoarseHoming(bool success, const QString& message) {
             finalMessage = QStringLiteral("置零失败: %1").arg(error);
         } else {
             motionService_.refreshPosition();
+            motionService_.setRelativeZero();
         }
     }
 
-    lblHomeResult_->setText(QStringLiteral("回零结果: %1").arg(finalMessage));
     if (finalSuccess) {
-        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
         logService_.info(QStringLiteral("回零"), finalMessage);
     } else {
         logService_.error(QStringLiteral("回零"), finalMessage);
@@ -1734,28 +2484,35 @@ void MainWindow::finishCoarseHoming(bool success, const QString& message) {
     updateBoardDependentUiState();
 }
 
-void MainWindow::finishFineHoming(bool success, const QString& message) {
+void MainWindow::finishFineHoming(bool success, const QString& message, bool promptAdjustZ) {
     fineHomeTimer_.stop();
-    if (fineHoming_ && motionService_.stateText() != QStringLiteral("READY")) {
-        motionService_.stop(!success);
-    }
+    const bool shouldStopMotion = fineHoming_ && motionService_.stateText() != QStringLiteral("READY");
     boardAdapter_.setPollIntervalMs(200);
     fineHoming_ = false;
     fineHomeElapsedMs_ = 0;
     fineHomeStartPulse_ = 0;
     fineHomeStage_ = FineHomeStage::Idle;
     fineHomeJogSpeedPulseMs_ = 0.0;
+    fineHomeScanDirection_ = appConfig_.fineHomeDirection > 0 ? 1 : -1;
     fineHomeLastSwitchState_ = fineHomeSwitchTriggeredFromRaw(lastDiRaw_);
+    if (shouldStopMotion) {
+        motionService_.stop(!success);
+    }
 
-    lblHomeResult_->setText(QStringLiteral("回零结果: %1").arg(message));
     if (success) {
-        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): 0.000"));
         logService_.info(QStringLiteral("回零"), message);
     } else {
-        lblZeroErrorDeg_->setText(QStringLiteral("零点误差(°): N/A"));
         logService_.error(QStringLiteral("回零"), message);
     }
     updateBoardDependentUiState();
+
+    if (promptAdjustZ) {
+        QMessageBox::information(
+            this,
+            success ? QStringLiteral("通孔精零完成") : QStringLiteral("通孔精零提示"),
+            success ? QStringLiteral("已找到通孔中心并完成旋转轴归零。请调整 Z 位置。")
+                    : QStringLiteral("%1\n请调整 Z 位置后重新执行通孔精零。").arg(message));
+    }
 }
 
 void MainWindow::handleSafetyTrip(const QString& reason) {
@@ -1775,7 +2532,6 @@ void MainWindow::handleSafetyTrip(const QString& reason) {
         motionService_.stop(true);
     }
 
-    lblSyncState_->setText(QStringLiteral("同步状态: ALARM"));
     logService_.error(QStringLiteral("安全"), QStringLiteral("联锁触发: %1").arg(reason));
     updateBoardDependentUiState();
 }
@@ -1798,7 +2554,7 @@ void MainWindow::updateSyncElapsedLabel(qint64 elapsedMs) {
     const qint64 minute = (totalSec % 3600) / 60;
     const qint64 second = totalSec % 60;
     lblSyncElapsed_->setText(
-        QStringLiteral("同步耗时: %1:%2:%3")
+        QStringLiteral("用时 %1:%2:%3")
             .arg(hour, 2, 10, QLatin1Char('0'))
             .arg(minute, 2, 10, QLatin1Char('0'))
             .arg(second, 2, 10, QLatin1Char('0')));
@@ -2006,6 +2762,8 @@ void MainWindow::stopSyncWorkflow(bool powerOffProjector) {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     syncElapsedUiTimer_.stop();
+    cameraProfileSaveTimer_.stop();
+    saveCameraProfile();
     if (syncPlaybackService_.isRunning()) {
         stopSyncWorkflow(false);
     }
@@ -2031,8 +2789,18 @@ void MainWindow::updateBoardDependentUiState() {
     if (btnCoarseCheck_ != nullptr) {
         btnCoarseCheck_->setEnabled(canHome);
     }
+    if (btnCoarseMechanicalHome_ != nullptr) {
+        btnCoarseMechanicalHome_->setEnabled(canHome);
+    }
     if (btnFineHome_ != nullptr) {
         btnFineHome_->setEnabled(canHome);
+    }
+    const bool canRelativeZero = canHome && motionService_.stateText() == QStringLiteral("READY");
+    if (btnMoveAbsMotion_ != nullptr) {
+        btnMoveAbsMotion_->setEnabled(canRelativeZero);
+    }
+    if (btnMoveRelMotion_ != nullptr) {
+        btnMoveRelMotion_->setEnabled(canRelativeZero);
     }
     if (btnConfirmZReady_ != nullptr) {
         btnConfirmZReady_->setEnabled(
@@ -2099,19 +2867,20 @@ void MainWindow::updateLaserState(quint32 raw) {
     }
 
     if (!boardAdapter_.isConnected()) {
-        lblLaserState_->setText(QStringLiteral("对射状态: 未连接"));
+        lblLaserState_->setText(
+            QStringLiteral("通孔对射(DI%1): 未连接").arg(appConfig_.zLaserDiIndex));
         lblLaserState_->setStyleSheet(
             QStringLiteral("QLabel{background:#f5f7fa;border:1px solid #dbe2ea;border-radius:6px;padding:4px 8px;}"));
     } else if (laserTriggered_) {
-        const QString stateText = laserStableForZConfirm() ? QStringLiteral("已触发(稳定)")
-                                                           : QStringLiteral("已触发(稳定中)");
+        const QString stateText = laserStableForZConfirm() ? QStringLiteral("通光(稳定)")
+                                                           : QStringLiteral("通光(稳定中)");
         lblLaserState_->setText(
-            QStringLiteral("对射状态(DI%1): %2").arg(appConfig_.zLaserDiIndex).arg(stateText));
+            QStringLiteral("通孔对射(DI%1): %2").arg(appConfig_.zLaserDiIndex).arg(stateText));
         lblLaserState_->setStyleSheet(
             QStringLiteral("QLabel{background:#ecfdf3;border:1px solid #a6f4c5;color:#067647;border-radius:6px;padding:4px 8px;font-weight:600;}"));
     } else {
         lblLaserState_->setText(
-            QStringLiteral("对射状态(DI%1): 未触发").arg(appConfig_.zLaserDiIndex));
+            QStringLiteral("通孔对射(DI%1): 遮挡").arg(appConfig_.zLaserDiIndex));
         lblLaserState_->setStyleSheet(
             QStringLiteral("QLabel{background:#fff5f5;border:1px solid #e1b9b9;color:#9f1239;border-radius:6px;padding:4px 8px;font-weight:600;}"));
     }
@@ -2150,6 +2919,35 @@ void MainWindow::chooseCameraSaveDirectory() {
     cameraService_.setSaveDirectory(folder);
     if (editCameraSaveDir_ != nullptr) {
         editCameraSaveDir_->setText(QDir::toNativeSeparators(cameraService_.saveDirectory()));
+    }
+
+    // 保存路径到配置
+    appConfig_.lastCameraSavePath = folder;
+    configManager_.save(appConfig_, nullptr);
+}
+
+void MainWindow::rememberCameraControl(const QString& id, int value, bool autoMode) {
+    if (id.isEmpty()) {
+        return;
+    }
+    cameraProfile_.insert(QStringLiteral("control.%1.value").arg(id), value);
+    cameraProfile_.insert(QStringLiteral("control.%1.auto").arg(id), autoMode);
+    scheduleCameraProfileSave();
+}
+
+void MainWindow::scheduleCameraProfileSave() {
+    if (!cameraProfileId_.isEmpty()) {
+        cameraProfileSaveTimer_.start();
+    }
+}
+
+void MainWindow::saveCameraProfile() {
+    if (cameraProfileId_.isEmpty()) {
+        return;
+    }
+    QString error;
+    if (!configManager_.saveCameraProfile(cameraProfileId_, cameraProfile_, &error)) {
+        logService_.warn(QStringLiteral("相机"), error);
     }
 }
 
@@ -2287,28 +3085,31 @@ QWidget* MainWindow::createBoardMotionPanel() {
     editJogSpeedPulseMs_->setSingleStep(1.0);
     editJogSpeedPulseMs_->setSuffix(QStringLiteral(" °/s"));
 
-    editTargetAbsDeg_ = new QDoubleSpinBox();
+    editTargetAbsDeg_ = new QDoubleSpinBox(motionSectionWidget_);
     editTargetAbsDeg_->setObjectName(QStringLiteral("editTargetAbsDeg"));
     editTargetAbsDeg_->setRange(-360000.0, 360000.0);
     editTargetAbsDeg_->setDecimals(3);
     editTargetAbsDeg_->setSingleStep(1.0);
     editTargetAbsDeg_->setSuffix(QStringLiteral(" °"));
-    btnMoveAbsMotion_ = new QPushButton(QStringLiteral("绝对移动"));
+    editTargetAbsDeg_->setVisible(false);
+    btnMoveAbsMotion_ = new QPushButton(QStringLiteral("归零"));
     btnMoveAbsMotion_->setObjectName(QStringLiteral("btnMoveAbs"));
 
-    editTargetRelDeg_ = new QDoubleSpinBox();
+    editTargetRelDeg_ = new QDoubleSpinBox(motionSectionWidget_);
     editTargetRelDeg_->setObjectName(QStringLiteral("editTargetRelDeg"));
     editTargetRelDeg_->setRange(-360000.0, 360000.0);
     editTargetRelDeg_->setDecimals(3);
     editTargetRelDeg_->setSingleStep(1.0);
     editTargetRelDeg_->setSuffix(QStringLiteral(" °"));
-    btnMoveRelMotion_ = new QPushButton(QStringLiteral("相对移动"));
+    editTargetRelDeg_->setVisible(false);
+    btnMoveRelMotion_ = new QPushButton(QStringLiteral("回零"));
     btnMoveRelMotion_->setObjectName(QStringLiteral("btnMoveRel"));
 
-    lblCurrentDeg_ = new QLabel(QStringLiteral("当前角度: 0.000°"));
+    lblCurrentDeg_ = new QLabel(QStringLiteral("当前相对角度: 0.000°"));
     lblCurrentDeg_->setObjectName(QStringLiteral("lblCurrentDeg"));
-    lblCurrentPulse_ = new QLabel(QStringLiteral("当前位置脉冲: 0"));
+    lblCurrentPulse_ = new QLabel(QString());
     lblCurrentPulse_->setObjectName(QStringLiteral("lblCurrentPulse"));
+    lblCurrentPulse_->setVisible(false);
     lblMotionConfig_ = new QLabel(QStringLiteral("参数: -"));
     lblMotionConfig_->setObjectName(QStringLiteral("lblMotionConfig"));
 
@@ -2318,14 +3119,9 @@ QWidget* MainWindow::createBoardMotionPanel() {
     motionGrid->addWidget(btnEStopMotion_, 0, 3);
     motionGrid->addWidget(new QLabel(QStringLiteral("速度(°/s)")), 1, 0);
     motionGrid->addWidget(editJogSpeedPulseMs_, 1, 1, 1, 3);
-    motionGrid->addWidget(new QLabel(QStringLiteral("绝对角度")), 2, 0);
-    motionGrid->addWidget(editTargetAbsDeg_, 2, 1, 1, 2);
-    motionGrid->addWidget(btnMoveAbsMotion_, 2, 3);
-    motionGrid->addWidget(new QLabel(QStringLiteral("相对角度")), 3, 0);
-    motionGrid->addWidget(editTargetRelDeg_, 3, 1, 1, 2);
-    motionGrid->addWidget(btnMoveRelMotion_, 3, 3);
-    motionGrid->addWidget(lblCurrentDeg_, 4, 0, 1, 2);
-    motionGrid->addWidget(lblCurrentPulse_, 4, 2, 1, 2);
+    motionGrid->addWidget(lblCurrentDeg_, 2, 0, 1, 2);
+    motionGrid->addWidget(btnMoveAbsMotion_, 2, 2);
+    motionGrid->addWidget(btnMoveRelMotion_, 2, 3);
     motionGrid->addWidget(lblMotionConfig_, 5, 0, 1, 4);
     controlsLayout->addLayout(motionGrid);
 
@@ -2333,11 +3129,11 @@ QWidget* MainWindow::createBoardMotionPanel() {
     homeGrid->setHorizontalSpacing(8);
     homeGrid->setVerticalSpacing(8);
 
-    btnCoarseCheck_ = new QPushButton(QStringLiteral("快速回零"));
+    btnCoarseCheck_ = new QPushButton(QStringLiteral("机械回零"));
     btnCoarseCheck_->setObjectName(QStringLiteral("btnCoarseCheck"));
-    btnFineHome_ = new QPushButton(QStringLiteral("精确回零"));
+    btnFineHome_ = new QPushButton(QStringLiteral("通孔精零"));
     btnFineHome_->setObjectName(QStringLiteral("btnFineHome"));
-    lblLaserState_ = new QLabel(QStringLiteral("对射状态: 未连接"));
+    lblLaserState_ = new QLabel(QStringLiteral("通孔对射(DI0): 未连接"));
     lblLaserState_->setObjectName(QStringLiteral("lblLaserState"));
     lblLaserState_->setStyleSheet(
         QStringLiteral("QLabel{background:#f5f7fa;border:1px solid #dbe2ea;border-radius:6px;padding:4px 8px;}"));
@@ -2347,10 +3143,6 @@ QWidget* MainWindow::createBoardMotionPanel() {
     btnConfirmZReady_->setProperty("role", QStringLiteral("primary"));
     btnConfirmZReady_->setEnabled(false);
 
-    lblHomeResult_ = new QLabel(QStringLiteral("回零结果: N/A"));
-    lblHomeResult_->setObjectName(QStringLiteral("lblHomeResult"));
-    lblZeroErrorDeg_ = new QLabel(QStringLiteral("零点误差(°): N/A"));
-    lblZeroErrorDeg_->setObjectName(QStringLiteral("lblZeroErrorDeg"));
     lblZConfirmTime_ = new QLabel(QStringLiteral("Z确认时间: N/A"));
     lblZConfirmTime_->setObjectName(QStringLiteral("lblZConfirmTime"));
 
@@ -2463,10 +3255,17 @@ QWidget* MainWindow::createProjectorSyncPanel() {
 
     editRoundTimeSec_ = new QDoubleSpinBox();
     editRoundTimeSec_->setObjectName(QStringLiteral("editRoundTimeSec"));
-    editRoundTimeSec_->setRange(0.001, 360000.0);
-    editRoundTimeSec_->setDecimals(3);
-    editRoundTimeSec_->setSingleStep(1.0);
+    editRoundTimeSec_->setRange(0.1, 360000.0);
+    editRoundTimeSec_->setDecimals(1);
+    editRoundTimeSec_->setSingleStep(0.1);
     editRoundTimeSec_->setSuffix(QStringLiteral(" s"));
+    editRoundTimeSec_->setFixedWidth(90);
+    editRoundTimeSec_->setStyleSheet(
+        QStringLiteral("QDoubleSpinBox{min-width:90px;max-width:90px;padding:0 3px;}"));
+    spinLoopCount_->setFixedWidth(66);
+    spinLoopCount_->setStyleSheet(QStringLiteral("QSpinBox{min-width:66px;max-width:66px;padding:0 3px;}"));
+    btnSyncStart_->setMinimumWidth(90);
+    btnSyncStop_->setMinimumWidth(90);
 
     syncParamGrid->addWidget(new QLabel(QStringLiteral("循环次数")), 0, 0);
     syncParamGrid->addWidget(spinLoopCount_, 0, 1);
@@ -2479,28 +3278,25 @@ QWidget* MainWindow::createProjectorSyncPanel() {
     syncStatusGrid->setHorizontalSpacing(8);
     syncStatusGrid->setVerticalSpacing(8);
 
-    btnSyncStart_ = new QPushButton(QStringLiteral("开始同步"));
+    btnSyncStart_ = new QPushButton(QStringLiteral("开始投影"));
     btnSyncStart_->setObjectName(QStringLiteral("btnSyncStart"));
     btnSyncStart_->setProperty("role", QStringLiteral("primary"));
     btnSyncStart_->setMinimumWidth(120);
-    btnSyncStop_ = new QPushButton(QStringLiteral("停止同步"));
+    btnSyncStop_ = new QPushButton(QStringLiteral("停止投影"));
     btnSyncStop_->setObjectName(QStringLiteral("btnSyncStop"));
     btnSyncStop_->setMinimumWidth(120);
-    lblCurrentFrame_ = new QLabel(QStringLiteral("当前投影: N/A"));
+    lblCurrentFrame_ = new QLabel(QStringLiteral("帧 —"));
     lblCurrentFrame_->setObjectName(QStringLiteral("lblCurrentFrame"));
-    lblSyncState_ = new QLabel(QStringLiteral("同步状态: READY"));
-    lblSyncState_->setObjectName(QStringLiteral("lblSyncState"));
-    lblSyncProgress_ = new QLabel(QStringLiteral("同步进度: 0/0"));
+    lblSyncProgress_ = new QLabel(QStringLiteral("循环 0/0"));
     lblSyncProgress_->setObjectName(QStringLiteral("lblSyncProgress"));
-    lblSyncElapsed_ = new QLabel(QStringLiteral("同步耗时: 00:00:00"));
+    lblSyncElapsed_ = new QLabel(QStringLiteral("用时 00:00:00"));
     lblSyncElapsed_->setObjectName(QStringLiteral("lblSyncElapsed"));
 
     syncStatusGrid->addWidget(lblCurrentFrame_, 0, 0, 1, 3);
-    syncStatusGrid->addWidget(lblSyncState_, 0, 3, 1, 3);
-    syncStatusGrid->addWidget(lblSyncProgress_, 1, 0, 1, 3);
-    syncStatusGrid->addWidget(lblSyncElapsed_, 1, 3, 1, 3);
-    syncStatusGrid->addWidget(btnSyncStart_, 2, 0);
-    syncStatusGrid->addWidget(btnSyncStop_, 2, 1);
+    syncStatusGrid->addWidget(lblSyncProgress_, 0, 3, 1, 2);
+    syncStatusGrid->addWidget(lblSyncElapsed_, 0, 5, 1, 2);
+    syncStatusGrid->addWidget(btnSyncStart_, 1, 0, 1, 3);
+    syncStatusGrid->addWidget(btnSyncStop_, 1, 3, 1, 3);
     root->addLayout(syncStatusGrid);
 
     return box;
@@ -2593,6 +3389,8 @@ QWidget* MainWindow::createCameraPanel() {
 
     spinCameraBrightness_ = new QDoubleSpinBox();
     spinCameraBrightness_->setObjectName(QStringLiteral("spinCameraBrightness"));
+    spinCameraBrightness_->setMinimumWidth(64);
+    spinCameraBrightness_->setStyleSheet(QStringLiteral("QDoubleSpinBox{min-width:64px;}"));
     spinCameraBrightness_->setRange(-1.0, 1.0);
     spinCameraBrightness_->setDecimals(3);
     spinCameraBrightness_->setSingleStep(0.1);
@@ -2600,6 +3398,8 @@ QWidget* MainWindow::createCameraPanel() {
 
     spinCameraContrast_ = new QDoubleSpinBox();
     spinCameraContrast_->setObjectName(QStringLiteral("spinCameraContrast"));
+    spinCameraContrast_->setMinimumWidth(64);
+    spinCameraContrast_->setStyleSheet(QStringLiteral("QDoubleSpinBox{min-width:64px;}"));
     spinCameraContrast_->setRange(-1.0, 1.0);
     spinCameraContrast_->setDecimals(3);
     spinCameraContrast_->setSingleStep(0.1);
@@ -2607,6 +3407,8 @@ QWidget* MainWindow::createCameraPanel() {
 
     spinCameraSaturation_ = new QDoubleSpinBox();
     spinCameraSaturation_->setObjectName(QStringLiteral("spinCameraSaturation"));
+    spinCameraSaturation_->setMinimumWidth(64);
+    spinCameraSaturation_->setStyleSheet(QStringLiteral("QDoubleSpinBox{min-width:64px;}"));
     spinCameraSaturation_->setRange(-1.0, 1.0);
     spinCameraSaturation_->setDecimals(3);
     spinCameraSaturation_->setSingleStep(0.1);
@@ -2614,6 +3416,8 @@ QWidget* MainWindow::createCameraPanel() {
 
     spinCameraExposure_ = new QDoubleSpinBox();
     spinCameraExposure_->setObjectName(QStringLiteral("spinCameraExposure"));
+    spinCameraExposure_->setMinimumWidth(64);
+    spinCameraExposure_->setStyleSheet(QStringLiteral("QDoubleSpinBox{min-width:64px;}"));
     spinCameraExposure_->setRange(-1.0, 1.0);
     spinCameraExposure_->setDecimals(3);
     spinCameraExposure_->setSingleStep(0.1);

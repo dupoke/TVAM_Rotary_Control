@@ -134,7 +134,7 @@ void ProjectionWindow::showBlackFrame() {
     renderCurrentContent();
 }
 
-void ProjectionWindow::displayImage(const QString& filePath) {
+bool ProjectionWindow::displayImage(const QString& filePath) {
     contentMode_ = ContentMode::Image;
     currentImagePath_ = filePath;
     const QPixmap pixmap(filePath);
@@ -142,11 +142,12 @@ void ProjectionWindow::displayImage(const QString& filePath) {
         currentPixmap_ = QPixmap();
         imageLabel_->setPixmap(QPixmap());
         imageLabel_->setText(QStringLiteral("图片加载失败: %1").arg(QFileInfo(filePath).fileName()));
-        return;
+        return false;
     }
 
     currentPixmap_ = pixmap;
     refreshScaledPixmap();
+    return true;
 }
 
 void ProjectionWindow::showSiemensStarAlignment() {
@@ -233,20 +234,20 @@ QPixmap ProjectionWindow::currentPixmap() const {
 QString ProjectionWindow::currentStatusText() const {
     switch (contentMode_) {
     case ContentMode::Black:
-        return QStringLiteral("当前投影: 黑屏");
+        return QStringLiteral("黑屏");
     case ContentMode::SiemensStar:
-        return QStringLiteral("当前投影: 西门子星对准  个数=%1  旋转=%2°")
+        return QStringLiteral("西门子星 · %1 · %2°")
             .arg(siemensSlices_)
             .arg(siemensRotationDeg_, 0, 'f', 1);
     case ContentMode::ThreeLineAlignment:
-        return QStringLiteral("当前投影: 三线条对准  线宽=%1px  半线距=%2px")
+        return QStringLiteral("三线条 · %1px · %2px")
             .arg(lineHalfThickness_)
             .arg(lineHalfSeparation_);
     case ContentMode::Image:
-        return QStringLiteral("当前投影: 图片模式");
+        return QStringLiteral("图片");
     case ContentMode::Empty:
     default:
-        return QStringLiteral("当前投影: N/A");
+        return QStringLiteral("—");
     }
 }
 

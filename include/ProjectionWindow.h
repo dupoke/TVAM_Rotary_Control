@@ -23,7 +23,7 @@ public:
     void showForProjection();
     void hideProjection();
     void showBlackFrame();
-    void displayImage(const QString& filePath);
+    bool displayImage(const QString& filePath);
     void showSiemensStarAlignment();
     void showThreeLineAlignment();
     void clearAlignment();

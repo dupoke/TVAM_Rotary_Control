@@ -86,8 +86,10 @@ bool MotionService::jogStart(int direction, double velPulsePerMs) {
 }
 
 bool MotionService::moveToAbsDeg(double targetDeg) {
+    positionTargetReached_ = false;
     const qint64 target = static_cast<qint64>(qRound64(targetDeg * pulsePerDeg_));
     targetPulse_ = target;
+    activePositionPulsePerSec_ = maxVelPulsePerSec_;
 
     if (useHardware()) {
         QString error;
@@ -98,16 +100,18 @@ bool MotionService::moveToAbsDeg(double targetDeg) {
         }
         setMode(Mode::Positioning);
         syncPositionFromHardware();
-        emit motionLog(QStringLiteral("绝对移动(硬件)到 %1°").arg(targetDeg, 0, 'f', 3));
+        emit motionLog(QStringLiteral("定位(硬件)到 %1°").arg(targetDeg, 0, 'f', 3));
         return true;
     }
 
     setMode(Mode::Positioning);
-    emit motionLog(QStringLiteral("绝对移动到 %1°").arg(targetDeg, 0, 'f', 3));
+    emit motionLog(QStringLiteral("定位到 %1°").arg(targetDeg, 0, 'f', 3));
     return true;
 }
 
 bool MotionService::moveByRelDeg(double deltaDeg) {
+    positionTargetReached_ = false;
+    activePositionPulsePerSec_ = maxVelPulsePerSec_;
     const qint64 deltaPulse = static_cast<qint64>(qRound64(deltaDeg * pulsePerDeg_));
     targetPulse_ = currentPulse_ + deltaPulse;
 
@@ -120,13 +124,80 @@ bool MotionService::moveByRelDeg(double deltaDeg) {
         }
         setMode(Mode::Positioning);
         syncPositionFromHardware();
-        emit motionLog(QStringLiteral("相对移动(硬件) %1°").arg(deltaDeg, 0, 'f', 3));
+        emit motionLog(QStringLiteral("相对定位(硬件) %1°").arg(deltaDeg, 0, 'f', 3));
         return true;
     }
 
     setMode(Mode::Positioning);
-    emit motionLog(QStringLiteral("相对移动 %1°").arg(deltaDeg, 0, 'f', 3));
+    emit motionLog(QStringLiteral("相对定位 %1°").arg(deltaDeg, 0, 'f', 3));
     return true;
+}
+
+bool MotionService::startRevolution(double roundTimeSec) {
+    if (roundTimeSec <= 0.0) {
+        emit motionError(QStringLiteral("一圈时间必须大于0。"));
+        return false;
+    }
+
+    continuousPulsePerSec_ = (360.0 / roundTimeSec) * pulsePerDeg_;
+    if (continuousPulsePerSec_ <= 0.0 || continuousPulsePerSec_ > maxVelPulsePerSec_) {
+        emit motionError(QStringLiteral("一圈速度超出板卡配置上限。"));
+        return false;
+    }
+
+    activePositionPulsePerSec_ = continuousPulsePerSec_;
+    positionTargetReached_ = false;
+    const qint64 turnPulses = static_cast<qint64>(qRound64(360.0 * pulsePerDeg_));
+    targetPulse_ = currentPulse_ + turnPulses;
+
+    if (useHardware()) {
+        QString error;
+        if (!boardAdapter_->moveToPulse(axisIndex_, targetPulse_, activePositionPulsePerSec_ / 1000.0,
+                                        accPulsePerMs2_, decPulsePerMs2_, &error)) {
+            emit motionError(error);
+            return false;
+        }
+        setMode(Mode::Positioning);
+        syncPositionFromHardware();
+        emit motionLog(QStringLiteral("单圈定长运动(硬件)，目标脉冲=%1，一圈时间=%2 s")
+                           .arg(targetPulse_)
+                           .arg(roundTimeSec, 0, 'f', 3));
+        return true;
+    }
+
+    setMode(Mode::Positioning);
+    emit motionLog(QStringLiteral("单圈定长运动，目标脉冲=%1，一圈时间=%2 s")
+                       .arg(targetPulse_)
+                       .arg(roundTimeSec, 0, 'f', 3));
+    return true;
+}
+
+void MotionService::setRelativeZero() {
+    if (useHardware()) {
+        syncPositionFromHardware();
+    }
+    relativeZeroPulse_ = currentPulse_;
+    emit positionChanged(currentPulse_, currentTotalDeg(), currentCycleDeg());
+    emit motionLog(QStringLiteral("相对角度已归零。"));
+}
+
+bool MotionService::moveToRelativeZeroShortest() {
+    if (useHardware()) {
+        syncPositionFromHardware();
+    }
+    const double cycleDeg = currentCycleDeg();
+    double deltaDeg = 0.0;
+    if (cycleDeg <= 180.0) {
+        deltaDeg = -cycleDeg;
+    } else {
+        deltaDeg = 360.0 - cycleDeg;
+    }
+    if (qAbs(deltaDeg) < 1e-6) {
+        emit motionLog(QStringLiteral("当前已在相对零点。"));
+        emit positionChanged(currentPulse_, currentTotalDeg(), currentCycleDeg());
+        return true;
+    }
+    return moveByRelDeg(deltaDeg);
 }
 
 bool MotionService::startContinuous(double roundTimeSec) {
@@ -162,6 +233,9 @@ bool MotionService::startContinuous(double roundTimeSec) {
 
 void MotionService::stop(bool estop) {
     const bool wasRunning = mode_ != Mode::Idle;
+    if (wasRunning) {
+        positionTargetReached_ = false;
+    }
     if (wasRunning && useHardware()) {
         QString error;
         if (!boardAdapter_->stopAxis(axisIndex_, estop, &error)) {
@@ -190,12 +264,16 @@ qint64 MotionService::currentPulse() const {
     return currentPulse_;
 }
 
+bool MotionService::positionTargetReached() const {
+    return positionTargetReached_;
+}
+
 double MotionService::currentTotalDeg() const {
     return currentPulse_ / pulsePerDeg_;
 }
 
 double MotionService::currentCycleDeg() const {
-    return normalizeDeg(currentTotalDeg());
+    return normalizeDeg(static_cast<double>(currentPulse_ - relativeZeroPulse_) / pulsePerDeg_);
 }
 
 QString MotionService::stateText() const {
@@ -316,6 +394,7 @@ void MotionService::onTick() {
             }
             const bool running = (sts & kAxisRunningBit) != 0;
             if (!running) {
+                positionTargetReached_ = currentPulse_ == targetPulse_;
                 setMode(Mode::Idle);
                 emit motionFinished();
                 emit motionLog(QStringLiteral("定位完成。"));
@@ -339,10 +418,11 @@ void MotionService::onTick() {
             emit motionFinished();
             break;
         }
-        const qint64 stepLimit = static_cast<qint64>(qRound64(maxVelPulsePerSec_ * dtSec));
+        const qint64 stepLimit = static_cast<qint64>(qRound64(activePositionPulsePerSec_ * dtSec));
         const qint64 step = qBound<qint64>(-stepLimit, diff, stepLimit);
         currentPulse_ += step;
         if (currentPulse_ == targetPulse_) {
+            positionTargetReached_ = true;
             setMode(Mode::Idle);
             emit motionFinished();
             emit motionLog(QStringLiteral("定位完成。"));
