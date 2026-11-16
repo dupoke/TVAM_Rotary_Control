@@ -40,6 +40,6 @@ private:
     int loopTarget_ = 1;
     int currentLoop_ = 0;
     int nextFrameIndex_ = 0;
-    double startTotalDeg_ = 0.0;
+    qint64 startPulse_ = 0;
     double roundTimeSec_ = 0.0;
 };

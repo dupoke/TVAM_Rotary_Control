@@ -741,6 +741,8 @@ void MainWindow::wireSignals() {
                         .arg(targetText)
                         .arg(cycleDeg, 0, 'f', 3));
             });
+    connect(&syncPlaybackService_, &SyncPlaybackService::syncLog, this,
+            [this](const QString& msg) { logService_.info(QStringLiteral("同步"), msg); });
     connect(&syncPlaybackService_, &SyncPlaybackService::frameChanged, this,
             [this](int frameIndex, int loopIndex, const QString& filePath, double angleDeg) {
                 lblCurrentFrame_->setText(QStringLiteral("帧 %1 · 圈 %2 · %3°")
@@ -749,7 +751,7 @@ void MainWindow::wireSignals() {
                                               .arg(angleDeg, 0, 'f', 3));
                 projectionWindow_.displayImage(filePath);
                 if (lblProjectionPreview_ != nullptr) {
-                    QPixmap px(filePath);
+                    const QPixmap px = projectionWindow_.currentPixmap();
                     if (!px.isNull()) {
                         lblProjectionPreview_->setText(QString());
                         lblProjectionPreview_->setPixmap(
@@ -1858,7 +1860,10 @@ void MainWindow::wireSignals() {
         }
     });
 
-    connect(btnCheckImageFolder_, &QPushButton::clicked, this, [this]() { runImageFolderCheck(); });
+    connect(btnCheckImageFolder_, &QPushButton::clicked, this, [this]() {
+        resetSyncStatistics();
+        runImageFolderCheck();
+    });
     connect(editImageFolder_, &QLineEdit::editingFinished, this, [this]() { runImageFolderCheck(); });
 
     connect(btnSyncStart_, &QPushButton::clicked, this, [this]() {
@@ -2575,6 +2580,23 @@ void MainWindow::updateSyncElapsedLabel(qint64 elapsedMs) {
             .arg(second, 2, 10, QLatin1Char('0')));
 }
 
+void MainWindow::resetSyncStatistics() {
+    if (syncPlaybackService_.isRunning()) {
+        return;
+    }
+
+    syncElapsedUiTimer_.stop();
+    syncElapsedTimer_.invalidate();
+    syncElapsedMs_ = 0;
+    if (lblCurrentFrame_ != nullptr) {
+        lblCurrentFrame_->setText(QStringLiteral("帧 —"));
+    }
+    if (lblSyncProgress_ != nullptr) {
+        lblSyncProgress_->setText(QStringLiteral("循环 0/0 · 0.000°"));
+    }
+    updateSyncElapsedLabel(0);
+}
+
 bool MainWindow::autoConnectBoard() {
     if (boardAdapter_.isConnected()) {
         const QString openedPort = boardAdapter_.currentPort().trimmed().toUpper();
@@ -2824,6 +2846,9 @@ void MainWindow::updateBoardDependentUiState() {
     }
     if (btnSyncStop_ != nullptr && !syncRunning) {
         btnSyncStop_->setEnabled(false);
+    }
+    if (btnCheckImageFolder_ != nullptr) {
+        btnCheckImageFolder_->setEnabled(!syncRunning);
     }
 }
 

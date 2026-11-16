@@ -20,7 +20,7 @@ public:
     bool jogStart(int direction, double velPulsePerMs);
     bool moveToAbsDeg(double targetDeg);
     bool moveByRelDeg(double deltaDeg);
-    bool startRevolution(double roundTimeSec);
+    bool startSynchronizedRotation(double roundTimeSec, int revolutionCount, bool infinite);
     void setRelativeZero();
     bool moveToRelativeZeroShortest();
     bool startContinuous(double roundTimeSec);
@@ -28,6 +28,7 @@ public:
     void refreshPosition();
 
     qint64 currentPulse() const;
+    double pulsePerDeg() const;
     bool positionTargetReached() const;
     double currentTotalDeg() const;
     double currentCycleDeg() const;
@@ -76,4 +77,7 @@ private:
     BoardAdapter* boardAdapter_ = nullptr;
     int hardwareReadErrorCount_ = 0;
     bool positionTargetReached_ = false;
+    int stoppedPositionSamples_ = 0;
+    int stoppedPositionTicks_ = 0;
+    int hardwareStatusPollDivider_ = 0;
 };

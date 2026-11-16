@@ -4,14 +4,19 @@
 
 #include <QtMath>
 #include <cmath>
+#include <limits>
 
 namespace {
 constexpr long kAxisRunningBit = 0x00000400;
+constexpr qint64 kPositionTolerancePulse = 1;
+constexpr int kStoppedPositionConfirmSamples = 3;
+constexpr int kStoppedPositionTimeoutTicks = 15;
 }
 
 MotionService::MotionService(QObject* parent)
     : QObject(parent) {
-    tickTimer_.setInterval(20);
+    tickTimer_.setInterval(10);
+    tickTimer_.setTimerType(Qt::PreciseTimer);
     connect(&tickTimer_, &QTimer::timeout, this, &MotionService::onTick);
 }
 
@@ -133,9 +138,13 @@ bool MotionService::moveByRelDeg(double deltaDeg) {
     return true;
 }
 
-bool MotionService::startRevolution(double roundTimeSec) {
+bool MotionService::startSynchronizedRotation(double roundTimeSec, int revolutionCount, bool infinite) {
     if (roundTimeSec <= 0.0) {
         emit motionError(QStringLiteral("一圈时间必须大于0。"));
+        return false;
+    }
+    if (!infinite && revolutionCount <= 0) {
+        emit motionError(QStringLiteral("循环次数必须大于0。"));
         return false;
     }
 
@@ -147,8 +156,34 @@ bool MotionService::startRevolution(double roundTimeSec) {
 
     activePositionPulsePerSec_ = continuousPulsePerSec_;
     positionTargetReached_ = false;
+    stoppedPositionSamples_ = 0;
+    stoppedPositionTicks_ = 0;
+    if (useHardware()) {
+        syncPositionFromHardware();
+    }
+
+    if (infinite) {
+        if (useHardware()) {
+            QString error;
+            if (!boardAdapter_->jogStart(axisIndex_, +1, continuousPulsePerSec_ / 1000.0,
+                                         accPulsePerMs2_, decPulsePerMs2_, &error)) {
+                emit motionError(error);
+                return false;
+            }
+        }
+        setMode(Mode::Continuous);
+        emit motionLog(QStringLiteral("同步连续旋转开始，一圈时间=%1 s")
+                           .arg(roundTimeSec, 0, 'f', 3));
+        return true;
+    }
+
     const qint64 turnPulses = static_cast<qint64>(qRound64(360.0 * pulsePerDeg_));
-    targetPulse_ = currentPulse_ + turnPulses;
+    const qint64 maxTarget = static_cast<qint64>(std::numeric_limits<long>::max());
+    if (turnPulses <= 0 || revolutionCount > (maxTarget - currentPulse_) / turnPulses) {
+        emit motionError(QStringLiteral("总圈数对应的目标脉冲超出板卡位置范围。"));
+        return false;
+    }
+    targetPulse_ = currentPulse_ + turnPulses * revolutionCount;
 
     if (useHardware()) {
         QString error;
@@ -159,15 +194,16 @@ bool MotionService::startRevolution(double roundTimeSec) {
         }
         setMode(Mode::Positioning);
         syncPositionFromHardware();
-        emit motionLog(QStringLiteral("单圈定长运动(硬件)，目标脉冲=%1，一圈时间=%2 s")
+        emit motionLog(QStringLiteral("同步定长运动开始，目标=%1 圈，目标脉冲=%2，一圈时间=%3 s")
+                           .arg(revolutionCount)
                            .arg(targetPulse_)
                            .arg(roundTimeSec, 0, 'f', 3));
         return true;
     }
 
     setMode(Mode::Positioning);
-    emit motionLog(QStringLiteral("单圈定长运动，目标脉冲=%1，一圈时间=%2 s")
-                       .arg(targetPulse_)
+    emit motionLog(QStringLiteral("同步定长运动开始，目标=%1 圈，一圈时间=%2 s")
+                       .arg(revolutionCount)
                        .arg(roundTimeSec, 0, 'f', 3));
     return true;
 }
@@ -264,6 +300,10 @@ qint64 MotionService::currentPulse() const {
     return currentPulse_;
 }
 
+double MotionService::pulsePerDeg() const {
+    return pulsePerDeg_;
+}
+
 bool MotionService::positionTargetReached() const {
     return positionTargetReached_;
 }
@@ -304,6 +344,9 @@ void MotionService::setMode(Mode mode) {
         return;
     }
     mode_ = mode;
+    if (mode_ == Mode::Positioning) {
+        hardwareStatusPollDivider_ = 0;
+    }
     if (mode_ == Mode::Idle) {
         tickTimer_.stop();
     } else if (!tickTimer_.isActive()) {
@@ -386,6 +429,10 @@ void MotionService::onTick() {
         syncPositionFromHardware();
 
         if (mode_ == Mode::Positioning) {
+            hardwareStatusPollDivider_ = (hardwareStatusPollDivider_ + 1) % 2;
+            if (hardwareStatusPollDivider_ != 0) {
+                return;
+            }
             long sts = 0;
             QString error;
             if (!boardAdapter_->getAxisStatus(axisIndex_, sts, &error)) {
@@ -393,11 +440,37 @@ void MotionService::onTick() {
                 return;
             }
             const bool running = (sts & kAxisRunningBit) != 0;
-            if (!running) {
-                positionTargetReached_ = currentPulse_ == targetPulse_;
+            if (running) {
+                stoppedPositionSamples_ = 0;
+                stoppedPositionTicks_ = 0;
+            } else {
+                ++stoppedPositionTicks_;
+                const qint64 positionErrorPulse = targetPulse_ - currentPulse_;
+                if (qAbs(positionErrorPulse) <= kPositionTolerancePulse) {
+                    ++stoppedPositionSamples_;
+                } else {
+                    stoppedPositionSamples_ = 0;
+                }
+                if (stoppedPositionSamples_ < kStoppedPositionConfirmSamples &&
+                    stoppedPositionTicks_ < kStoppedPositionTimeoutTicks) {
+                    return;
+                }
+
+                positionTargetReached_ =
+                    stoppedPositionSamples_ >= kStoppedPositionConfirmSamples;
+                if (!positionTargetReached_) {
+                    emit motionError(QStringLiteral(
+                        "轴停止但未到达目标脉冲：目标=%1，实到=%2，差值=%3 脉冲，状态=0x%4。")
+                                         .arg(targetPulse_)
+                                         .arg(currentPulse_)
+                                         .arg(positionErrorPulse)
+                                         .arg(QString::number(static_cast<qulonglong>(sts), 16).toUpper()));
+                }
                 setMode(Mode::Idle);
                 emit motionFinished();
-                emit motionLog(QStringLiteral("定位完成。"));
+                if (!positionTargetReached_) {
+                    emit motionLog(QStringLiteral("定长运动因未到目标而结束。"));
+                }
             }
         }
         return;

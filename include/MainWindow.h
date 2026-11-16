@@ -77,6 +77,7 @@ private:
     void updateJogButtonStyle();
     void shutdownProjector();
     void stopSyncWorkflow();
+    void resetSyncStatistics();
     void updateSyncElapsedLabel(qint64 elapsedMs = -1);
     bool autoConnectBoard();
     bool autoConnectProjector();

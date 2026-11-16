@@ -4,6 +4,7 @@
 
 #include <QtGlobal>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -64,10 +65,10 @@ bool SyncPlaybackService::start(double roundTimeSec, int loopCount, bool infinit
     loopTarget_ = infinite ? 0 : loopCount;
     currentLoop_ = 0;
     nextFrameIndex_ = 0;
-    startTotalDeg_ = motionService_->currentTotalDeg();
+    startPulse_ = motionService_->currentPulse();
     roundTimeSec_ = roundTimeSec;
 
-    if (!motionService_->startRevolution(roundTimeSec_)) {
+    if (!motionService_->startSynchronizedRotation(roundTimeSec_, loopCount, infinite_)) {
         running_ = false;
         if (error != nullptr) {
             *error = QStringLiteral("启动单圈定长旋转失败，请检查一圈时间和板卡速度上限。");
@@ -75,6 +76,9 @@ bool SyncPlaybackService::start(double roundTimeSec, int loopCount, bool infinit
         return false;
     }
 
+    emit syncLog(QStringLiteral("同步启动：每圈定长 360°，目标 %1 圈，一圈 %2 s。")
+                     .arg(infinite_ ? QStringLiteral("∞") : QString::number(loopTarget_))
+                     .arg(roundTimeSec_, 0, 'f', 3));
     emit stateChanged(QStringLiteral("SYNC_RUNNING"));
     emit progressChanged(currentLoop_, loopTarget_, 0.0);
     return true;
@@ -107,19 +111,38 @@ int SyncPlaybackService::loopTarget() const {
     return loopTarget_;
 }
 
-void SyncPlaybackService::onMotionPositionChanged(qint64, double totalDeg, double cycleDeg) {
+void SyncPlaybackService::onMotionPositionChanged(qint64 pulse, double, double cycleDeg) {
     if (!running_ || frames_.isEmpty()) {
         return;
     }
 
-    const double relativeDeg = totalDeg - startTotalDeg_;
-    if (relativeDeg < 0.0) {
+    const qint64 turnPulses = qRound64(360.0 * motionService_->pulsePerDeg());
+    if (turnPulses <= 0) {
         return;
     }
 
+    qint64 relativePulse = pulse - startPulse_;
+    if (relativePulse < 0) {
+        return;
+    }
+    const qint64 requestedPulse = infinite_ ? relativePulse : turnPulses * loopTarget_;
+    relativePulse = qMin(relativePulse, requestedPulse);
+    const int completedLoops = static_cast<int>(qMin(
+        static_cast<double>(infinite_ ? std::numeric_limits<int>::max() : loopTarget_),
+        static_cast<double>(relativePulse / turnPulses)));
+    const int playbackLoop = infinite_
+                                 ? completedLoops
+                                 : qMin(qMax(0, completedLoops), qMax(0, loopTarget_ - 1));
+    if (playbackLoop != currentLoop_) {
+        currentLoop_ = playbackLoop;
+        nextFrameIndex_ = 0;
+    }
+
     while (nextFrameIndex_ < frames_.size()) {
-        const double triggerDeg = currentLoop_ * 360.0 + frames_[nextFrameIndex_].angleDeg;
-        if (relativeDeg + 1e-6 < triggerDeg) {
+        const qint64 framePulse = qRound64(frames_[nextFrameIndex_].angleDeg *
+                                           motionService_->pulsePerDeg());
+        const qint64 triggerPulse = static_cast<qint64>(currentLoop_) * turnPulses + framePulse;
+        if (relativePulse < triggerPulse) {
             break;
         }
 
@@ -129,7 +152,8 @@ void SyncPlaybackService::onMotionPositionChanged(qint64, double totalDeg, doubl
     }
 
     Q_UNUSED(cycleDeg);
-    emit progressChanged(currentLoop_, loopTarget_, normalizeRelativeDeg(relativeDeg));
+    const double relativeDeg = static_cast<double>(relativePulse) / motionService_->pulsePerDeg();
+    emit progressChanged(completedLoops, loopTarget_, normalizeRelativeDeg(relativeDeg));
 }
 
 void SyncPlaybackService::onMotionFinished() {
@@ -137,21 +161,15 @@ void SyncPlaybackService::onMotionFinished() {
         return;
     }
     if (!motionService_->positionTargetReached()) {
+        emit syncLog(QStringLiteral("第 %1 圈未确认到达目标位置，已停止同步。")
+                         .arg(currentLoop_ + 1));
         stop(false);
         return;
     }
 
-    ++currentLoop_;
-    if (!infinite_ && currentLoop_ >= loopTarget_) {
-        emit progressChanged(currentLoop_, loopTarget_, 0.0);
-        stop(true);
-        return;
-    }
-
-    nextFrameIndex_ = 0;
+    currentLoop_ = loopTarget_;
     emit progressChanged(currentLoop_, loopTarget_, 0.0);
-    if (!motionService_->startRevolution(roundTimeSec_)) {
-        emit syncLog(QStringLiteral("下一圈定长运动启动失败，已安全结束同步。"));
-        stop(false);
-    }
+    emit syncLog(QStringLiteral("已完成 %1 圈，运动到达总目标位置。")
+                     .arg(loopTarget_));
+    stop(true);
 }
